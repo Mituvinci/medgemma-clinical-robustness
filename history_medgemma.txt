@@ -1,0 +1,23 @@
+
+  Build Sequence
+
+  1. Project Structure - Foundation setup (folders, requirements.txt, configs)
+
+  2. Data Ingestion Pipeline - ChromaDB setup, scraper for guidelines, embedding system
+
+  3. Agent System - 3-agent workflow (Triage → Research → Diagnostic) using Google ADK
+
+  4. Gradio UI - Multimodal interface connecting everything together
+
+  5. Evaluation Setup - 25 test cases, robustness metrics, logging
+
+  This order ensures each component builds on the previous one.
+
+  ---
+  Let me start with Step 1: Project Structure. I'll create:
+  - Organized folder structure
+  - requirements.txt with all dependencies
+  - Configuration files for API keys
+  - Basic scaffolding files
+
+  Shall I proceed with creating the project structure now?

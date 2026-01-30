@@ -1,0 +1,46 @@
+# Core Dependencies
+python-dotenv==1.0.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# AI/ML Models
+google-cloud-aiplatform==1.38.0
+google-genai==0.2.0
+google-adk==0.1.0
+transformers==4.36.2
+sentence-transformers==2.2.2
+torch==2.1.2
+huggingface-hub==0.20.2
+
+# Vector Database
+chromadb==0.4.22
+langchain==0.1.0
+langchain-community==0.0.10
+
+# UI Framework
+gradio==4.12.0
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+pillow==10.1.0
+pypdf==3.17.4
+beautifulsoup4==4.12.2
+requests==2.31.0
+lxml==5.1.0
+
+# Utilities
+tenacity==8.2.3
+tqdm==4.66.1
+python-json-logger==2.0.7
+pyyaml==6.0.1
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-mock==3.12.0
+
+# Development
+black==23.12.1
+flake8==7.0.0
+mypy==1.8.0

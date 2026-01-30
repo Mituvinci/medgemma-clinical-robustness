@@ -1,0 +1,94 @@
+{
+  "cases": [
+    {
+      "case_id": "CASE_001",
+      "context_state": "original",
+      "patient_age": 45,
+      "patient_gender": "Female",
+      "chief_complaint": "Itchy rash on hands for 2 weeks",
+      "history": "Patient reports a 2-week history of an itchy, red rash on both hands. The rash started after she began using a new dishwashing detergent. She has a history of seasonal allergies but no prior skin conditions. The itching is worse at night and improves slightly with over-the-counter hydrocortisone cream.",
+      "physical_exam": "Physical examination reveals erythematous, vesicular lesions on the dorsal aspects of both hands with areas of excoriation. No involvement of palms or other body areas. Skin is warm to touch but not significantly edematous.",
+      "image_path": null,
+      "gold_standard_diagnosis": "Allergic contact dermatitis"
+    },
+    {
+      "case_id": "CASE_001_HISTORY_ONLY",
+      "context_state": "history_only",
+      "patient_age": 45,
+      "patient_gender": "Female",
+      "chief_complaint": "Itchy rash on hands for 2 weeks",
+      "history": "Patient reports a 2-week history of an itchy, red rash on both hands. The rash started after she began using a new dishwashing detergent. She has a history of seasonal allergies but no prior skin conditions. The itching is worse at night and improves slightly with over-the-counter hydrocortisone cream.",
+      "physical_exam": null,
+      "image_path": null,
+      "gold_standard_diagnosis": "Allergic contact dermatitis"
+    },
+    {
+      "case_id": "CASE_001_IMAGE_ONLY",
+      "context_state": "image_only",
+      "patient_age": null,
+      "patient_gender": null,
+      "chief_complaint": null,
+      "history": null,
+      "physical_exam": null,
+      "image_path": "mock_image_dermatitis.jpg",
+      "gold_standard_diagnosis": "Allergic contact dermatitis"
+    },
+    {
+      "case_id": "CASE_002",
+      "context_state": "original",
+      "patient_age": 62,
+      "patient_gender": "Male",
+      "chief_complaint": "New mole on back, changing appearance",
+      "history": "Patient noticed a new pigmented lesion on his upper back 6 months ago. Over the past 2 months, he reports the lesion has increased in size and developed irregular borders. No bleeding or itching. Patient has a history of significant sun exposure during his career as a lifeguard. Family history positive for melanoma in his father.",
+      "physical_exam": "A 9mm asymmetric, darkly pigmented macule with irregular, notched borders is present on the upper back. The lesion displays variegated coloration with areas of dark brown, black, and light tan. No palpable component. No regional lymphadenopathy.",
+      "image_path": null,
+      "gold_standard_diagnosis": "Melanoma (suspicious for)"
+    },
+    {
+      "case_id": "CASE_003",
+      "context_state": "original",
+      "patient_age": 28,
+      "patient_gender": "Female",
+      "chief_complaint": "Red, scaly patches on elbows and knees",
+      "history": "Patient has a 5-year history of recurrent red, scaly plaques on her elbows and knees. The lesions are not particularly itchy but are cosmetically bothersome. She notes that the condition worsens during winter months and improves in summer. No joint pain or nail changes. Mother has similar skin condition.",
+      "physical_exam": "Well-demarcated erythematous plaques with silvery-white scale are present bilaterally on the extensor surfaces of elbows and knees. Auspitz sign positive on removal of scale. No nail pitting or onycholysis observed. No joint swelling or tenderness.",
+      "image_path": null,
+      "gold_standard_diagnosis": "Plaque psoriasis"
+    },
+    {
+      "case_id": "CASE_004",
+      "context_state": "original",
+      "patient_age": 8,
+      "patient_gender": "Male",
+      "chief_complaint": "Blistering rash around mouth",
+      "history": "Mother reports child developed crusted, honey-colored lesions around the mouth and nose 3 days ago. Started as small blisters that quickly ruptured. Child attends daycare where several other children have had similar rashes. No fever, and child is otherwise well. No known drug allergies.",
+      "physical_exam": "Multiple honey-crusted erosions and pustules are present around the perioral and perinasal areas. No extension to trunk or extremities. Cervical lymph nodes are slightly enlarged but non-tender. Oral mucosa is clear.",
+      "image_path": null,
+      "gold_standard_diagnosis": "Impetigo"
+    },
+    {
+      "case_id": "CASE_005",
+      "context_state": "exam_restricted",
+      "patient_age": 35,
+      "patient_gender": "Female",
+      "chief_complaint": "Facial redness and flushing",
+      "history": "Patient reports chronic facial redness that worsens with sun exposure, hot beverages, and spicy foods. She also experiences intermittent small pustules on her cheeks and nose. No itching. Symptoms have progressively worsened over the past 2 years. No history of acne during adolescence.",
+      "physical_exam": "Facial erythema present.",
+      "image_path": null,
+      "gold_standard_diagnosis": "Rosacea"
+    }
+  ],
+  "metadata": {
+    "version": "1.0",
+    "created_date": "2026-01-30",
+    "description": "Mock clinical cases for MedGemma evaluation. Cases are derived from common dermatological presentations and are provided for testing purposes only.",
+    "total_cases": 5,
+    "context_variations": [
+      "original",
+      "history_only",
+      "image_only",
+      "exam_restricted"
+    ],
+    "note": "Full 25-case evaluation dataset will include NEJM Image Challenge-style cases with actual dermatology images. This mock set is for development and reproducibility testing."
+  }
+}

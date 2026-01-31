@@ -14,15 +14,24 @@ load_dotenv()
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # API Keys
+    # API Keys - Active
     huggingface_api_key: str = os.getenv("HUGGINGFACE_API_KEY", "")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     google_cloud_project: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     google_application_credentials: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
+    # API Keys - Future (add when available)
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    claude_api_key: str = os.getenv("CLAUDE_API_KEY", "")
+
+    # Active Model Selection
+    active_model: str = os.getenv("ACTIVE_MODEL", "medgemma")  # Options: medgemma, gemini, gpt4, claude
+
     # Model Configuration
     medgemma_model_id: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-27b")
     gemini_model_id: str = os.getenv("GEMINI_MODEL_ID", "gemini-pro")
+    openai_model_id: str = os.getenv("OPENAI_MODEL_ID", "gpt-4-turbo")
+    claude_model_id: str = os.getenv("CLAUDE_MODEL_ID", "claude-3-opus-20240229")
 
     # ChromaDB Configuration
     chroma_persist_dir: str = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")

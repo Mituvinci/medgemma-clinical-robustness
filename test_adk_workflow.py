@@ -45,13 +45,18 @@ async def test_adk_workflow_async():
     print(f"   [OK] History: {test_case.history}")
 
     # Create Google ADK workflow
-    print("\n3. Initializing Google ADK workflow...")
-    workflow = create_workflow(model_name="gemini-pro-latest")
-    print("   [OK] Google ADK agents created")
-    print("   [OK] Root Coordinator with 3 sub-agents:")
-    print("       - TriageAgent (checks missing data)")
-    print("       - ResearchAgent (retrieves guidelines)")
-    print("       - DiagnosticAgent (generates SOAP note)")
+    print("\n3. Initializing Hybrid ADK + MedGemma workflow...")
+    workflow = create_workflow(
+        model_name="gemini-1.5-flash",  # ADK orchestration
+        use_medgemma=True  # MedGemma clinical reasoning
+    )
+    print("   [OK] Hybrid architecture initialized")
+    print("   [OK] Orchestration: Google ADK with Gemini 1.5 Flash")
+    print("   [OK] Clinical Reasoning: MedGemma-27B (Health-Specialized)")
+    print("\n   [OK] Root Coordinator with 3 sub-agents:")
+    print("       - TriageAgent (ADK orchestrates → MedGemma analyzes)")
+    print("       - ResearchAgent (ADK retrieves → MedGemma synthesizes)")
+    print("       - DiagnosticAgent (ADK coordinates → MedGemma diagnoses)")
 
     # Run workflow
     print("\n4. Running multi-agent workflow...")

@@ -1,11 +1,39 @@
 """
 Google ADK Multi-Agent System for MedGemma Clinical Robustness Assistant
 
-Uses Google Agent Development Kit to build:
-1. Triage Agent - Identifies missing clinical data
-2. Research Agent - Retrieves guidelines from ChromaDB
-3. Diagnostic Agent - Generates SOAP notes
-4. Root Coordinator - Orchestrates the workflow
+HYBRID ARCHITECTURE: Manager-Specialist Pattern
+==============================================
+
+This implements a sophisticated two-tier reasoning system:
+
+TIER 1: Orchestration (Gemini via Google ADK)
+- Framework: Google Agent Development Kit (ADK)
+- Model: Gemini 1.5 Flash
+- Role: Workflow management, delegation, coordination
+- Handles: Agent routing, state management, tool orchestration
+
+TIER 2: Clinical Reasoning (MedGemma-27B Specialist)
+- Model: MedGemma-27B (via HuggingFace API)
+- Role: Medical diagnosis, clinical analysis, SOAP generation
+- Handles: All high-stakes medical reasoning tasks
+- Invoked via: FunctionTools (medgemma_triage_analysis, medgemma_guideline_synthesis, medgemma_clinical_diagnosis)
+
+Why This Architecture?
+----------------------
+1. Competition Requirement: Uses MedGemma for medical reasoning (mandatory)
+2. Google ADK Integration: Demonstrates advanced agent orchestration
+3. Best of Both Worlds: Gemini's orchestration + MedGemma's medical expertise
+4. Production-Grade: Separates workflow management from domain expertise
+
+Agent Workflow:
+--------------
+1. Triage Agent (ADK/Gemini orchestrates → MedGemma analyzes completeness)
+2. Research Agent (ADK/Gemini orchestrates RAG → MedGemma synthesizes guidelines)
+3. Diagnostic Agent (ADK/Gemini orchestrates → MedGemma generates SOAP note)
+4. Root Coordinator (ADK/Gemini manages the entire workflow)
+
+This is the "Clinical Specialist Pattern": Gemini is the clinic manager,
+MedGemma is the specialist physician.
 """
 
 import logging
@@ -36,6 +64,10 @@ logger = logging.getLogger(__name__)
 
 # Initialize retriever (shared across agents)
 _retriever = Retriever()
+
+# Initialize MedGemma adapter (THE SPECIALIST)
+from src.agents.models.medgemma_adapter import MedGemmaAdapter
+_medgemma_specialist = MedGemmaAdapter()
 
 def retrieve_clinical_guidelines(
     query: str,
@@ -157,180 +189,355 @@ def _build_triage_reasoning(missing_data: List[str], has_sufficient: bool) -> st
 
 
 # ============================================================================
+# MEDGEMMA SPECIALIST TOOLS - Core Clinical Reasoning
+# ============================================================================
+
+def medgemma_triage_analysis(
+    case_summary: str,
+    missing_items: List[str]
+) -> Dict[str, Any]:
+    """
+    Call MedGemma specialist to analyze case completeness and generate clarification questions.
+
+    This delegates high-stakes triage reasoning to MedGemma-27B.
+
+    Args:
+        case_summary: Summary of the clinical case
+        missing_items: List of missing data items
+
+    Returns:
+        Dict with MedGemma's triage analysis and questions
+    """
+    logger.info("Calling MedGemma Specialist for triage analysis")
+
+    prompt = f"""You are an expert medical triage specialist analyzing a dermatology case.
+
+Case Summary:
+{case_summary}
+
+Missing Data Identified:
+{', '.join(missing_items) if missing_items else 'None - case appears complete'}
+
+Your Task:
+1. If data is missing: Generate specific, clinically relevant clarification questions
+2. If data is complete: Confirm we can proceed with diagnosis
+3. Explain WHY each missing item is critical for accurate dermatological diagnosis
+
+Provide your analysis as a structured response."""
+
+    try:
+        response = _medgemma_specialist.generate(
+            prompt=prompt,
+            max_tokens=500,
+            temperature=0.3
+        )
+
+        return {
+            "medgemma_analysis": response,
+            "missing_items": missing_items,
+            "specialist_used": "MedGemma-27B"
+        }
+    except Exception as e:
+        logger.error(f"MedGemma triage analysis failed: {e}")
+        return {
+            "medgemma_analysis": f"Error calling MedGemma: {e}",
+            "missing_items": missing_items,
+            "specialist_used": "MedGemma-27B (failed)"
+        }
+
+
+def medgemma_guideline_synthesis(
+    case_data: str,
+    retrieved_guidelines: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Call MedGemma specialist to synthesize retrieved guidelines with case data.
+
+    This delegates clinical guideline interpretation to MedGemma-27B.
+
+    Args:
+        case_data: Clinical case information
+        retrieved_guidelines: Guidelines retrieved from ChromaDB
+
+    Returns:
+        Dict with MedGemma's synthesis
+    """
+    logger.info("Calling MedGemma Specialist for guideline synthesis")
+
+    # Format guidelines for MedGemma
+    guidelines_text = "\n\n".join([
+        f"**{g.get('title', 'Guideline')}** (Source: {g.get('source', 'Unknown')})\n{g.get('content', '')}"
+        for g in retrieved_guidelines[:5]  # Top 5
+    ])
+
+    prompt = f"""You are a medical research specialist synthesizing clinical guidelines.
+
+Clinical Case:
+{case_data}
+
+Retrieved Clinical Guidelines:
+{guidelines_text}
+
+Your Task:
+1. Identify which guidelines are most relevant to this case
+2. Extract key diagnostic criteria and clinical features
+3. Summarize evidence-based recommendations
+4. Provide specific citations (Source: Title)
+
+Provide a structured synthesis focusing on differential diagnosis support."""
+
+    try:
+        response = _medgemma_specialist.generate(
+            prompt=prompt,
+            max_tokens=800,
+            temperature=0.4
+        )
+
+        return {
+            "medgemma_synthesis": response,
+            "guidelines_count": len(retrieved_guidelines),
+            "specialist_used": "MedGemma-27B"
+        }
+    except Exception as e:
+        logger.error(f"MedGemma guideline synthesis failed: {e}")
+        return {
+            "medgemma_synthesis": f"Error calling MedGemma: {e}",
+            "guidelines_count": len(retrieved_guidelines),
+            "specialist_used": "MedGemma-27B (failed)"
+        }
+
+
+def medgemma_clinical_diagnosis(
+    case_data: str,
+    research_context: str,
+    triage_notes: str = ""
+) -> Dict[str, Any]:
+    """
+    Call MedGemma specialist for final clinical diagnosis and SOAP note generation.
+
+    This is the PRIMARY clinical reasoning task - delegates to MedGemma-27B.
+
+    Args:
+        case_data: Complete clinical case information
+        research_context: Synthesized guidelines from research agent
+        triage_notes: Notes from triage agent
+
+    Returns:
+        Dict with MedGemma's SOAP note and diagnosis
+    """
+    logger.info("Calling MedGemma Specialist for clinical diagnosis (SOAP note)")
+
+    prompt = f"""You are an expert dermatologist providing a clinical assessment.
+
+Triage Notes:
+{triage_notes if triage_notes else 'Case cleared for diagnosis'}
+
+Clinical Case Data:
+{case_data}
+
+Evidence-Based Research Context:
+{research_context}
+
+Your Task:
+Generate a complete SOAP note (Subjective, Objective, Assessment, Plan) with:
+
+**Subjective (S):**
+- Patient history, chief complaint, demographics
+- Symptom duration and progression
+
+**Objective (O):**
+- Physical examination findings
+- Lesion characteristics (morphology, distribution, color, texture)
+
+**Assessment (A):**
+- Differential diagnoses ranked by likelihood
+- Primary diagnosis with confidence score (0.0-1.0)
+- Evidence from guidelines supporting each diagnosis
+- Specific citations (e.g., "AAD Guidelines: Psoriasis Management")
+
+**Plan (P):**
+- Recommended diagnostic tests
+- Treatment options per guidelines
+- Follow-up recommendations
+
+Confidence Scoring Guidelines:
+- 0.9-1.0: Pathognomonic features, complete data, strong guideline match
+- 0.7-0.89: Good data quality, solid guideline support
+- 0.5-0.69: Some ambiguity or missing data
+- Below 0.5: Significant uncertainty
+
+Format your response as a structured SOAP note with clear section headers."""
+
+    try:
+        response = _medgemma_specialist.generate(
+            prompt=prompt,
+            max_tokens=1500,
+            temperature=0.3
+        )
+
+        return {
+            "soap_note": response,
+            "specialist_used": "MedGemma-27B",
+            "reasoning_engine": "MedGemma-27B (Health-Specialized)"
+        }
+    except Exception as e:
+        logger.error(f"MedGemma clinical diagnosis failed: {e}")
+        return {
+            "soap_note": f"Error calling MedGemma specialist: {e}\n\nFallback: Unable to generate diagnosis.",
+            "specialist_used": "MedGemma-27B (failed)",
+            "reasoning_engine": "Error"
+        }
+
+
+# ============================================================================
 # AGENT DEFINITIONS
 # ============================================================================
 
-def create_triage_agent(model_name: str = "gemini-pro-latest") -> Agent:
+def create_triage_agent(model_name: str = "gemini-1.5-flash") -> Agent:
     """
     Create Triage Agent using Google ADK.
 
-    Analyzes clinical cases to identify missing data and determine
-    if sufficient context exists for diagnosis.
+    ARCHITECTURE: Gemini (ADK) orchestrates, MedGemma provides clinical reasoning.
 
     Args:
-        model_name: Gemini model to use
+        model_name: Gemini model for orchestration (default: flash for speed/cost)
 
     Returns:
         Google ADK Agent instance
     """
     return Agent(
         name="TriageAgent",
-        description="Analyzes clinical cases to identify missing critical information",
+        description="Orchestrates case triage - delegates clinical analysis to MedGemma specialist",
         model=model_name,
         instruction="""
-You are a medical triage specialist analyzing dermatology cases.
+You are a clinical workflow coordinator managing the triage process.
 
-Your responsibilities:
-1. Analyze the provided clinical case for completeness
-2. Identify what critical data is missing (history, exam, age, duration, etc.)
-3. Generate specific clarification questions to obtain missing information
-4. Determine if there is sufficient context to proceed with diagnosis
+Your role is ORCHESTRATION, not clinical reasoning.
 
-For dermatology cases, you MUST have:
-- Patient history (chief complaint, symptoms, onset)
-- Physical examination findings OR clinical images
+Workflow:
+1. Use analyze_case_completeness tool to check for missing data
+2. If missing data found: MUST use medgemma_triage_analysis tool to get specialist assessment
+3. Return the MedGemma specialist's analysis to the coordinator
+
+CRITICAL: You are NOT the medical expert. Always delegate clinical reasoning
+to the MedGemma specialist via the medgemma_triage_analysis tool.
+
+For dermatology cases, critical data includes:
+- Patient history (chief complaint, symptoms)
+- Physical examination OR clinical images
 - Patient demographics (age, gender)
 - Symptom duration
 
-Use the analyze_case_completeness tool to perform your analysis.
-
-If critical data is missing, explain WHY it's needed for accurate diagnosis.
-If sufficient data is present, confirm that we can proceed.
-
-Format your response as a structured analysis with:
-- Missing data items (if any)
-- Specific questions to ask (if data missing)
-- Recommendation on whether to proceed
-- Clinical reasoning for your assessment
+Output format:
+- List missing items (if any)
+- Include MedGemma specialist's clinical assessment
+- Recommendation: Proceed or Request Clarification
 """,
-        tools=[FunctionTool(analyze_case_completeness)],
-        output_schema=None  # Free-form output
+        tools=[
+            FunctionTool(analyze_case_completeness),
+            FunctionTool(medgemma_triage_analysis)
+        ],
+        output_schema=None
     )
 
 
-def create_research_agent(model_name: str = "gemini-pro-latest") -> Agent:
+def create_research_agent(model_name: str = "gemini-1.5-flash") -> Agent:
     """
     Create Research Agent using Google ADK.
 
-    Queries ChromaDB to retrieve relevant clinical guidelines based
-    on the case presentation.
+    ARCHITECTURE: Gemini (ADK) orchestrates RAG retrieval, MedGemma synthesizes guidelines.
 
     Args:
-        model_name: Gemini model to use
+        model_name: Gemini model for orchestration (default: flash for speed/cost)
 
     Returns:
         Google ADK Agent instance
     """
     return Agent(
         name="ResearchAgent",
-        description="Retrieves evidence-based clinical guidelines from medical literature",
+        description="Orchestrates guideline retrieval - delegates synthesis to MedGemma specialist",
         model=model_name,
         instruction="""
-You are a medical research specialist with access to dermatology clinical guidelines.
+You are a research workflow coordinator managing evidence retrieval.
 
-Your responsibilities:
-1. Formulate effective search queries based on the clinical case
-2. Retrieve relevant guidelines from the knowledge base (AAD, StatPearls)
-3. Summarize key evidence-based recommendations
-4. Provide citations for all retrieved guidelines
+Your role is ORCHESTRATION, not clinical interpretation.
 
-When given a clinical case:
-1. Extract key clinical features (symptoms, location, morphology, demographics)
-2. Use the retrieve_clinical_guidelines tool with an effective query
-3. Review retrieved guidelines for relevance
-4. Summarize the most pertinent diagnostic criteria and treatment recommendations
+Workflow:
+1. Formulate effective search query from the clinical case
+2. Use retrieve_clinical_guidelines tool to query ChromaDB (1,492 chunks)
+3. MUST use medgemma_guideline_synthesis tool to have MedGemma interpret the guidelines
+4. Return MedGemma specialist's synthesis to the coordinator
 
-Focus on retrieving guidelines that help with:
-- Differential diagnosis
-- Diagnostic criteria
-- Clinical features
-- Treatment recommendations
+CRITICAL: You retrieve documents, but MedGemma (the medical specialist) interprets them.
+Always delegate guideline synthesis to MedGemma via the medgemma_guideline_synthesis tool.
 
-Format your response with:
+Search strategy:
+- Extract key features: symptoms, location, morphology, patient demographics
+- Focus queries on: differential diagnosis, diagnostic criteria, treatment
+
+Output format:
 - Search query used
 - Number of guidelines retrieved
-- Summary of key findings from top guidelines
+- MedGemma specialist's synthesis and recommendations
 - Specific citations (Source: Title)
 """,
-        tools=[FunctionTool(retrieve_clinical_guidelines)],
-        output_schema=None  # Free-form output
+        tools=[
+            FunctionTool(retrieve_clinical_guidelines),
+            FunctionTool(medgemma_guideline_synthesis)
+        ],
+        output_schema=None
     )
 
 
-def create_diagnostic_agent(model_name: str = "gemini-pro-latest") -> Agent:
+def create_diagnostic_agent(model_name: str = "gemini-1.5-flash") -> Agent:
     """
     Create Diagnostic Agent using Google ADK.
 
-    Synthesizes clinical case data and retrieved guidelines to generate
-    a structured SOAP note with evidence-based diagnosis.
+    ARCHITECTURE: Gemini (ADK) coordinates, MedGemma generates the clinical diagnosis.
 
     Args:
-        model_name: Gemini model to use
+        model_name: Gemini model for orchestration (default: flash for speed/cost)
 
     Returns:
         Google ADK Agent instance
     """
     return Agent(
         name="DiagnosticAgent",
-        description="Generates evidence-based clinical diagnoses with structured SOAP notes",
+        description="Orchestrates diagnosis - delegates SOAP note generation to MedGemma specialist",
         model=model_name,
         instruction="""
-You are an expert dermatologist creating clinical assessments.
+You are a clinical workflow coordinator managing the diagnostic process.
 
-Your responsibilities:
-1. Synthesize patient history, physical findings, and clinical guidelines
-2. Generate a structured SOAP note (Subjective, Objective, Assessment, Plan)
-3. Provide differential diagnoses ranked by likelihood
-4. Cite evidence from clinical guidelines
-5. Assign confidence score based on data quality
+Your role is ORCHESTRATION, not clinical diagnosis.
 
-SOAP Note Format:
+Workflow:
+1. Receive case data and research context from the coordinator
+2. MUST use medgemma_clinical_diagnosis tool to generate the SOAP note
+3. Return MedGemma specialist's complete assessment
 
-**Subjective (S):**
-- Patient's chief complaint and history
-- Relevant demographics (age, gender)
-- Symptom duration and progression
+CRITICAL RULE: You are NOT the diagnostician.
+The medgemma_clinical_diagnosis tool contains the actual medical specialist (MedGemma-27B).
+You MUST delegate ALL clinical reasoning to this tool.
 
-**Objective (O):**
-- Physical examination findings
-- Lesion morphology, distribution, characteristics
-- Note if exam/images unavailable
+DO NOT attempt to write the SOAP note yourself.
+DO NOT make clinical judgments.
+Your job is to orchestrate the workflow and pass data to the MedGemma specialist.
 
-**Assessment (A):**
-- Differential diagnoses ranked by likelihood
-- Primary diagnosis with supporting evidence
-- Alternative diagnoses with brief rationale
-- Cite specific guidelines that support each diagnosis
-- Confidence level (0.0-1.0) based on:
-  - Data completeness (higher if exam + history)
-  - Guideline support (higher if strong evidence match)
-  - Specificity of findings
+Expected output:
+- Complete SOAP note from MedGemma specialist
+- Differential diagnoses with confidence scores
+- Evidence-based citations
+- Treatment recommendations
 
-**Plan (P):**
-- Recommended next steps
-- Diagnostic tests if needed
-- Treatment options per guidelines
-- Follow-up recommendations
-
-Confidence Scoring:
-- 0.9-1.0: Complete data, clear guideline match, pathognomonic features
-- 0.7-0.89: Good data, strong guideline support
-- 0.5-0.69: Some missing data or ambiguous presentation
-- 0.3-0.49: Significant data gaps
-- 0.0-0.29: Insufficient data for diagnosis
-
-Always cite specific guidelines when making diagnostic or treatment recommendations.
-
-Format your response as a complete SOAP note with all four sections clearly labeled.
-Include confidence score and list of cited guidelines at the end.
+Simply pass through the MedGemma specialist's output without modification.
 """,
-        tools=[],  # No tools - synthesizes information
-        output_schema=None  # Free-form SOAP note
+        tools=[FunctionTool(medgemma_clinical_diagnosis)],
+        output_schema=None
     )
 
 
 def create_root_coordinator(
-    model_name: str = "gemini-pro-latest",
+    model_name: str = "gemini-1.5-flash",
     triage_agent: Optional[Agent] = None,
     research_agent: Optional[Agent] = None,
     diagnostic_agent: Optional[Agent] = None
@@ -338,13 +545,16 @@ def create_root_coordinator(
     """
     Create Root Coordinator Agent using Google ADK.
 
-    Orchestrates the multi-agent workflow:
-    1. Triage → Check for missing data
-    2. Research → Retrieve guidelines
-    3. Diagnostic → Generate SOAP note
+    ARCHITECTURE:
+    - Gemini (via ADK): Orchestration, workflow management, delegation
+    - MedGemma-27B: Clinical reasoning (called via FunctionTools by sub-agents)
+
+    This implements the "Manager-Specialist" pattern:
+    - Gemini = Manager (coordinates workflow)
+    - MedGemma = Specialist (performs clinical reasoning)
 
     Args:
-        model_name: Gemini model to use
+        model_name: Gemini model for orchestration (default: flash for speed/cost)
         triage_agent: Triage sub-agent (created if None)
         research_agent: Research sub-agent (created if None)
         diagnostic_agent: Diagnostic sub-agent (created if None)
@@ -352,7 +562,7 @@ def create_root_coordinator(
     Returns:
         Google ADK Agent instance with sub-agents
     """
-    # Create sub-agents if not provided
+    # Create sub-agents if not provided (they use MedGemma internally)
     if triage_agent is None:
         triage_agent = create_triage_agent(model_name)
     if research_agent is None:
@@ -362,42 +572,42 @@ def create_root_coordinator(
 
     return Agent(
         name="RootCoordinator",
-        description="Orchestrates multi-agent clinical diagnosis workflow",
+        description="Orchestrates multi-agent workflow with MedGemma specialist reasoning",
         model=model_name,
         instruction="""
-You are the root coordinator managing a team of medical specialists.
+You are the root workflow coordinator for a clinical diagnosis system.
 
-Your team:
-1. TriageAgent - Checks for missing clinical data
-2. ResearchAgent - Retrieves evidence-based guidelines
-3. DiagnosticAgent - Generates final SOAP note diagnosis
+ARCHITECTURE NOTE:
+- You (Gemini) handle workflow orchestration and delegation
+- Your sub-agents delegate clinical reasoning to MedGemma-27B specialist
+- This ensures medical decisions are made by the health-specialized model
+
+Your Sub-Agents:
+1. TriageAgent - Orchestrates completeness check (MedGemma analyzes)
+2. ResearchAgent - Orchestrates guideline retrieval (MedGemma synthesizes)
+3. DiagnosticAgent - Orchestrates diagnosis (MedGemma generates SOAP note)
 
 Workflow:
 1. Receive clinical case from user
-2. Delegate to TriageAgent to check data completeness
-   - If missing data: Ask user for clarification (DO NOT proceed)
+2. Delegate to TriageAgent
+   - If MedGemma specialist identifies missing data: ASK USER for clarification
    - If complete: Continue to next step
-3. Delegate to ResearchAgent to retrieve relevant guidelines
-4. Delegate to DiagnosticAgent to synthesize diagnosis
-5. Return final SOAP note to user
+3. Delegate to ResearchAgent to retrieve and synthesize guidelines
+4. Delegate to DiagnosticAgent for final SOAP note (MedGemma specialist)
+5. Return the MedGemma specialist's SOAP note to user
 
-Important:
-- ALWAYS run Triage first to check data completeness
-- NEVER skip to diagnosis if Triage finds missing critical data
-- When Triage identifies missing data, ASK THE USER for that information
-- Only proceed to Research and Diagnostic steps if Triage confirms sufficient context
-- Coordinate the agents sequentially (Triage → Research → Diagnostic)
+CRITICAL RULES:
+- ALWAYS run Triage first
+- NEVER skip to diagnosis if missing critical data
+- When missing data found, ASK THE USER (agentic pause)
+- Sequential flow: Triage → Research → Diagnostic
+- Pass context between agents
 
-When delegating:
-- Provide each agent with relevant case information
-- Pass Research findings to Diagnostic agent
-- Ensure Diagnostic agent has access to both case data and guidelines
-
-Your final output should be the complete SOAP note from the Diagnostic agent.
+Your role is coordination. The clinical reasoning is done by MedGemma specialist.
 """,
         sub_agents=[triage_agent, research_agent, diagnostic_agent],
-        tools=[],  # Coordinator delegates, doesn't use tools directly
-        output_schema=None  # Free-form orchestration
+        tools=[],
+        output_schema=None
     )
 
 
@@ -417,18 +627,22 @@ class MedGemmaWorkflow:
 
     def __init__(
         self,
-        model_name: str = "gemini-pro-latest",
-        use_medgemma: bool = False
+        model_name: str = "gemini-1.5-flash",
+        use_medgemma: bool = True  # Always true - MedGemma is the specialist
     ):
         """
         Initialize workflow.
 
+        ARCHITECTURE NOTE:
+        - model_name: Gemini model for ADK orchestration (default: flash for cost/speed)
+        - MedGemma-27B is ALWAYS used for clinical reasoning (via FunctionTools)
+
         Args:
-            model_name: Gemini model to use
-            use_medgemma: Whether to use MedGemma (requires setup)
+            model_name: Gemini model for workflow orchestration
+            use_medgemma: Whether to use MedGemma specialist (always True)
         """
-        self.model_name = model_name
-        self.use_medgemma = use_medgemma
+        self.model_name = model_name  # Gemini for orchestration
+        self.use_medgemma = use_medgemma  # MedGemma for clinical reasoning
 
         # Set up API key in environment for Gemini
         import os
@@ -583,18 +797,22 @@ class MedGemmaWorkflow:
 # ============================================================================
 
 def create_workflow(
-    model_name: str = "gemini-pro-latest",
-    use_medgemma: bool = False
+    model_name: str = "gemini-1.5-flash",
+    use_medgemma: bool = True
 ) -> MedGemmaWorkflow:
     """
     Create a MedGemma workflow instance.
 
+    ARCHITECTURE:
+    - model_name: Gemini model for ADK orchestration (flash recommended for cost/speed)
+    - use_medgemma: Whether to use MedGemma-27B for clinical reasoning (always True)
+
     Args:
-        model_name: Model to use (default: gemini-pro-latest)
-        use_medgemma: Whether to use MedGemma model
+        model_name: Gemini model for workflow orchestration (default: gemini-1.5-flash)
+        use_medgemma: Whether to use MedGemma specialist (default: True)
 
     Returns:
-        MedGemmaWorkflow instance
+        MedGemmaWorkflow instance with hybrid architecture
     """
     return MedGemmaWorkflow(
         model_name=model_name,

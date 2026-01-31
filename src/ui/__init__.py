@@ -1,3 +1,9 @@
-"""UI package for Gradio interface."""
+"""
+UI Package for MedGemma Clinical Robustness Assistant
 
-__all__ = ["GradioApp"]
+Contains Gradio interface and components.
+"""
+
+from src.ui.app import launch_app, MedGemmaApp
+
+__all__ = ["launch_app", "MedGemmaApp"]

@@ -46,7 +46,7 @@ async def test_adk_workflow_async():
 
     # Create Google ADK workflow
     print("\n3. Initializing Google ADK workflow...")
-    workflow = create_workflow(model_name="gemini-2.0-flash-exp")
+    workflow = create_workflow(model_name="gemini-pro-latest")
     print("   [OK] Google ADK agents created")
     print("   [OK] Root Coordinator with 3 sub-agents:")
     print("       - TriageAgent (checks missing data)")

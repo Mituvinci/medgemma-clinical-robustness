@@ -160,7 +160,7 @@ def _build_triage_reasoning(missing_data: List[str], has_sufficient: bool) -> st
 # AGENT DEFINITIONS
 # ============================================================================
 
-def create_triage_agent(model_name: str = "gemini-2.0-flash-exp") -> Agent:
+def create_triage_agent(model_name: str = "gemini-pro-latest") -> Agent:
     """
     Create Triage Agent using Google ADK.
 
@@ -208,7 +208,7 @@ Format your response as a structured analysis with:
     )
 
 
-def create_research_agent(model_name: str = "gemini-2.0-flash-exp") -> Agent:
+def create_research_agent(model_name: str = "gemini-pro-latest") -> Agent:
     """
     Create Research Agent using Google ADK.
 
@@ -257,7 +257,7 @@ Format your response with:
     )
 
 
-def create_diagnostic_agent(model_name: str = "gemini-2.0-flash-exp") -> Agent:
+def create_diagnostic_agent(model_name: str = "gemini-pro-latest") -> Agent:
     """
     Create Diagnostic Agent using Google ADK.
 
@@ -330,7 +330,7 @@ Include confidence score and list of cited guidelines at the end.
 
 
 def create_root_coordinator(
-    model_name: str = "gemini-2.0-flash-exp",
+    model_name: str = "gemini-pro-latest",
     triage_agent: Optional[Agent] = None,
     research_agent: Optional[Agent] = None,
     diagnostic_agent: Optional[Agent] = None
@@ -417,7 +417,7 @@ class MedGemmaWorkflow:
 
     def __init__(
         self,
-        model_name: str = "gemini-2.0-flash-exp",
+        model_name: str = "gemini-pro-latest",
         use_medgemma: bool = False
     ):
         """
@@ -465,15 +465,17 @@ class MedGemmaWorkflow:
         Returns:
             Dict with agent responses and final diagnosis
         """
-        # Use ADK's session management - create new session each time
+        # Use ADK's session management - create session properly
         import uuid
         user_id = "user_001"
         adk_session_id = str(uuid.uuid4())
 
-        # Create session in ADK's session service
-        from google.adk.sessions import Session
-        adk_session = Session(user_id=user_id, session_id=adk_session_id)
-        self.runner.session_service.create_session(adk_session)
+        # Create session using session service (async)
+        adk_session = await self.runner.session_service.create_session(
+            app_name="MedGemma Clinical Assistant",
+            user_id=user_id,
+            session_id=adk_session_id
+        )
 
         # Format case as message
         if user_message is None:
@@ -499,7 +501,7 @@ class MedGemmaWorkflow:
             if hasattr(event, 'content') and event.content:
                 if hasattr(event.content, 'parts'):
                     for part in event.content.parts:
-                        if hasattr(part, 'text'):
+                        if hasattr(part, 'text') and part.text:  # Check not None
                             response_text += part.text + "\n"
 
         # Create our session for logging
@@ -581,14 +583,14 @@ class MedGemmaWorkflow:
 # ============================================================================
 
 def create_workflow(
-    model_name: str = "gemini-2.0-flash-exp",
+    model_name: str = "gemini-pro-latest",
     use_medgemma: bool = False
 ) -> MedGemmaWorkflow:
     """
     Create a MedGemma workflow instance.
 
     Args:
-        model_name: Model to use (default: gemini-2.0-flash-exp)
+        model_name: Model to use (default: gemini-pro-latest)
         use_medgemma: Whether to use MedGemma model
 
     Returns:

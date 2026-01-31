@@ -46,6 +46,27 @@ class Settings(BaseSettings):
     cases_dir: Path = data_dir / "cases"
     local_cache_dir: Path = project_root / "local_cache"
 
+    # Uppercase aliases for backwards compatibility
+    @property
+    def BASE_DIR(self) -> Path:
+        return self.project_root
+
+    @property
+    def CHROMA_PERSIST_DIR(self) -> str:
+        return self.chroma_persist_dir
+
+    @property
+    def EMBEDDING_MODEL(self) -> str:
+        return self.embedding_model
+
+    @property
+    def CHUNK_SIZE(self) -> int:
+        return self.chunk_size
+
+    @property
+    def CHUNK_OVERLAP(self) -> int:
+        return self.chunk_overlap
+
     class Config:
         env_file = ".env"
         case_sensitive = False

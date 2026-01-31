@@ -8,7 +8,6 @@ Provides a clean interface for ChromaDB operations including:
 """
 
 import chromadb
-from chromadb.config import Settings
 from typing import List, Dict, Optional, Any
 import logging
 from pathlib import Path
@@ -39,13 +38,21 @@ class VectorStore:
         # Ensure persist directory exists
         Path(self.persist_directory).mkdir(parents=True, exist_ok=True)
 
-        # Initialize ChromaDB client with persistence
-        self.client = chromadb.Client(Settings(
-            persist_directory=self.persist_directory,
-            anonymized_telemetry=False
-        ))
-
-        logger.info(f"Initialized ChromaDB at {self.persist_directory}")
+        # Initialize ChromaDB client with persistence (for ChromaDB >= 0.4.0)
+        try:
+            # Try ChromaDB 1.x API first
+            self.client = chromadb.PersistentClient(
+                path=self.persist_directory
+            )
+            logger.info(f"Initialized ChromaDB 1.x at {self.persist_directory}")
+        except AttributeError:
+            # Fallback to ChromaDB 0.4.x API
+            from chromadb.config import Settings
+            self.client = chromadb.Client(Settings(
+                persist_directory=self.persist_directory,
+                anonymized_telemetry=False
+            ))
+            logger.info(f"Initialized ChromaDB 0.4.x at {self.persist_directory}")
 
         # Collection will be created/loaded lazily
         self._collection = None
@@ -155,6 +162,14 @@ class VectorStore:
             self.client.delete_collection(name=self.collection_name)
             self._collection = None
             logger.info(f"Deleted collection '{self.collection_name}'")
+        except ValueError as e:
+            # Collection doesn't exist, which is fine
+            if "does not exist" in str(e):
+                logger.info(f"Collection '{self.collection_name}' does not exist, nothing to delete")
+                self._collection = None
+            else:
+                logger.error(f"Error deleting collection: {e}")
+                raise
         except Exception as e:
             logger.error(f"Error deleting collection: {e}")
             raise
@@ -189,5 +204,14 @@ class VectorStore:
     def reset_collection(self) -> None:
         """Delete and recreate collection (fresh start)."""
         logger.warning(f"Resetting collection '{self.collection_name}'")
-        self.delete_collection()
+        try:
+            self.delete_collection()
+        except Exception as e:
+            logger.warning(f"Could not delete collection (may not exist): {e}")
+
+        # Reset the cached collection
+        self._collection = None
+
+        # Create a fresh collection
         self._collection = self.get_or_create_collection()
+        logger.info(f"Collection '{self.collection_name}' reset successfully")

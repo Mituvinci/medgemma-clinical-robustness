@@ -37,11 +37,21 @@ def run_ingestion():
     """Run the data ingestion pipeline to populate ChromaDB."""
     logger.info("Starting data ingestion pipeline...")
     try:
-        from src.rag.ingestion import run_ingestion_pipeline
-        run_ingestion_pipeline()
+        from src.rag.ingestion import run_ingestion_from_config
+
+        total_chunks = run_ingestion_from_config()
+
+        if total_chunks > 0:
+            logger.info(f"Ingestion completed successfully! Total chunks: {total_chunks}")
+        else:
+            logger.warning("No chunks were ingested. Check your data directories.")
+
     except ImportError as e:
         logger.error(f"Failed to import ingestion module: {e}")
         logger.info("Make sure you've completed Step 2 (Data Ingestion)")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error during ingestion: {e}")
         sys.exit(1)
 
 

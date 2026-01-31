@@ -137,3 +137,42 @@ def log_model_call(logger: logging.Logger, model_name: str, prompt_length: int, 
             "operation": "model_call"
         }
     )
+
+
+def pii_filter(text: str) -> str:
+    """
+    Filter PII from text string.
+
+    Args:
+        text: Text to filter
+
+    Returns:
+        Filtered text with PII redacted
+    """
+    import re
+
+    # Common PII patterns
+    patterns = {
+        r'\b\d{3}-\d{2}-\d{4}\b': '[REDACTED_SSN]',  # SSN
+        r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b': '[REDACTED_EMAIL]',  # Email
+        r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b': '[REDACTED_PHONE]',  # Phone
+        r'\b\d{4}-\d{2}-\d{2}\b': '[REDACTED_DATE]',  # Date YYYY-MM-DD
+        r'\b\d{2}/\d{2}/\d{4}\b': '[REDACTED_DATE]',  # Date MM/DD/YYYY
+    }
+
+    filtered_text = text
+    for pattern, replacement in patterns.items():
+        filtered_text = re.sub(pattern, replacement, filtered_text)
+
+    # Redact common PII keywords
+    pii_keywords = PIISafeFilter.PII_KEYWORDS
+    for keyword in pii_keywords:
+        # Case-insensitive replacement
+        filtered_text = re.sub(
+            rf'({keyword})\s*[:\s]+([^\s,]+)',
+            rf'\1: [REDACTED]',
+            filtered_text,
+            flags=re.IGNORECASE
+        )
+
+    return filtered_text

@@ -119,14 +119,16 @@ class Retriever:
                 continue
 
             documents.append(RetrievedDocument(
-                doc_id=doc_id,
-                text=text,
-                metadata=metadata,
-                similarity=similarity
+                content=text,
+                source=metadata.get("source", "unknown"),
+                title=metadata.get("title"),
+                section=metadata.get("section"),
+                similarity_score=similarity,
+                metadata=metadata
             ))
 
         # Sort by similarity (descending)
-        documents.sort(key=lambda x: x.similarity, reverse=True)
+        documents.sort(key=lambda x: x.similarity_score, reverse=True)
 
         return documents
 

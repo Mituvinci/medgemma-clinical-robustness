@@ -93,7 +93,7 @@ class AgentFactory:
         Returns:
             Triage agent instance
         """
-        from src.agents.implementations.triage_agent import TriageAgent
+        from src.agents.triage_agent import TriageAgent
 
         return TriageAgent(llm=self.llm, **kwargs)
 
@@ -108,7 +108,7 @@ class AgentFactory:
         Returns:
             Research agent instance
         """
-        from src.agents.implementations.research_agent import ResearchAgent
+        from src.agents.research_agent import ResearchAgent
 
         if retriever is None:
             retriever = Retriever()
@@ -125,7 +125,7 @@ class AgentFactory:
         Returns:
             Diagnostic agent instance
         """
-        from src.agents.implementations.diagnostic_agent import DiagnosticAgent
+        from src.agents.diagnostic_agent import DiagnosticAgent
 
         return DiagnosticAgent(llm=self.llm, **kwargs)
 

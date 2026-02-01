@@ -32,17 +32,18 @@ class MedGemmaApp:
         Initialize the Gradio app.
 
         ARCHITECTURE:
-        - Orchestration: Google ADK with Gemini 1.5 Flash
-        - Clinical Reasoning: MedGemma-27B (health-specialized)
+        - Orchestration: Google ADK with Gemini Pro Latest (gemini-pro-latest)
+        - Clinical Reasoning: medgemma-27b-it (google/medgemma-27b-it) [DEFAULT]
+        - Toggle Option: Can switch agents to use Gemini Pro Latest for comparison
         """
         self.workflow = create_workflow(
-            model_name="gemini-pro-latest",  # ADK orchestration
-            use_medgemma=True  # MedGemma for clinical reasoning
+            model_name="gemini-pro-latest",  # ADK orchestration (ALWAYS Gemini Pro Latest)
+            use_medgemma=True  # DEFAULT: medgemma-27b-it for clinical reasoning
         )
         self.current_case = None
         self.conversation_history = []
 
-        logger.info("MedGemmaApp initialized (Hybrid: ADK+Gemini Pro orchestration, MedGemma reasoning)")
+        logger.info("MedGemmaApp initialized (Hybrid: ADK+Gemini Pro Latest orchestration, medgemma-27b-it reasoning)")
 
     def parse_case_file(self, file_path: str) -> Optional[Dict[str, Any]]:
         """

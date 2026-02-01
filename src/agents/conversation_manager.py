@@ -78,15 +78,42 @@ class ConversationSession:
 
     def _generate_session_id(self) -> str:
         """
-        Generate meaningful session ID.
+        Generate meaningful session ID with auto-incrementing run number.
 
-        Format: case_{case_id}_{agent_model}_{timestamp}
-        Example: case_test_adk_001_medgemma_20260201_014419
+        Format: case_{run_number}_{agent_model}_{timestamp}
+        Example: case_001_medgemma_20260201_014419
+
+        Auto-increments by checking existing files in logs/sessions/ directory.
+        If case_001, case_002, ..., case_005 exist, generates case_006.
         """
+        # Get logs directory
+        logs_dir = Path(settings.log_dir) / "sessions"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find existing case_*.json files
+        existing_files = list(logs_dir.glob("case_*.json"))
+
+        # Extract run numbers from existing files
+        max_run_number = 0
+        for filepath in existing_files:
+            filename = filepath.stem  # Get filename without .json extension
+            # Parse filename: case_XXX_model_timestamp
+            parts = filename.split("_")
+            if len(parts) >= 2:
+                try:
+                    # Try to parse the second part as run number
+                    run_number = int(parts[1])
+                    max_run_number = max(max_run_number, run_number)
+                except ValueError:
+                    # Skip files that don't match expected format
+                    continue
+
+        # Next run number
+        next_run_number = max_run_number + 1
+
+        # Generate session ID
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        # Clean case_id (remove special chars for filename safety)
-        safe_case_id = self.case_id.replace("/", "_").replace("\\", "_").replace(" ", "_")
-        return f"case_{safe_case_id}_{self.agent_model}_{timestamp}"
+        return f"case_{next_run_number:03d}_{self.agent_model}_{timestamp}"
 
     def set_initial_input(self, input_data: Dict[str, Any]):
         """

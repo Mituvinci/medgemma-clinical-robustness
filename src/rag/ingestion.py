@@ -214,10 +214,10 @@ def run_ingestion_from_config() -> int:
 
     pipeline = IngestionPipeline()
 
-    # Get directories from project root
+    # Get directories from SourceKnowledgeBase
     project_root = Path(settings.BASE_DIR)
-    aad_dir = project_root / "AAD"
-    statpearls_dir = project_root / "StatPearls"
+    aad_dir = project_root / "SourceKnowledgeBase" / "AAD"
+    statpearls_dir = project_root / "SourceKnowledgeBase" / "StatPearls"
 
     directories = []
 

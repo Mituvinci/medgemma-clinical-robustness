@@ -146,24 +146,58 @@ class DocumentProcessor:
             logger.error(f"Error reading PDF {file_path}: {e}")
             return []
 
+    def _extract_text_from_nested(self, obj, max_depth=10, current_depth=0):
+        """
+        Recursively extract text from nested JSON structures.
+
+        Args:
+            obj: Any JSON object (dict, list, str, etc.)
+            max_depth: Maximum recursion depth
+            current_depth: Current depth (internal)
+
+        Returns:
+            Extracted text as string
+        """
+        if current_depth > max_depth:
+            return ""
+
+        if isinstance(obj, str):
+            return obj
+        elif isinstance(obj, (int, float, bool)):
+            return str(obj)
+        elif isinstance(obj, list):
+            # Join list items with newlines
+            texts = [self._extract_text_from_nested(item, max_depth, current_depth + 1)
+                     for item in obj]
+            return "\n".join(text for text in texts if text)
+        elif isinstance(obj, dict):
+            # Extract text from all dict values
+            texts = []
+            for key, value in obj.items():
+                # Skip metadata keys
+                if key in ["source", "document_type", "year", "file_type", "file_path"]:
+                    continue
+                text = self._extract_text_from_nested(value, max_depth, current_depth + 1)
+                if text:
+                    texts.append(text)
+            return "\n\n".join(texts)
+        else:
+            return ""
+
     def process_json(self, file_path: Path) -> List[Document]:
         """
-        Extract text from JSON file.
+        Extract text from JSON file with support for multiple formats.
 
-        Expected format (AAD/StatPearls):
-        {
-            "title": "...",
-            "sections": [
-                {"heading": "...", "content": "..."},
-                ...
-            ]
-        }
+        Handles:
+        - AAD format: nested dicts with "content" key
+        - StatPearls format: "sections" dict with arrays
+        - Generic JSON: any nested structure
 
         Args:
             file_path: Path to JSON
 
         Returns:
-            List of Document objects (one per section)
+            List of Document objects
         """
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -174,38 +208,64 @@ class DocumentProcessor:
             # Determine source from file path
             source = "StatPearls" if "StatPearls" in str(file_path) else "AAD"
 
-            # Extract title
-            title = data.get("title", file_path.stem)
+            # Extract title from various possible locations
+            title = None
+            if isinstance(data.get("title"), str):
+                title = data["title"]
+            elif isinstance(data.get("source"), dict) and "guideline_title" in data["source"]:
+                title = data["source"]["guideline_title"]
+            elif "condition" in data:
+                title = data["condition"]
+            else:
+                title = file_path.stem
 
-            # Process sections
-            sections = data.get("sections", [])
+            # Strategy 1: StatPearls format - sections dict with arrays
+            if "sections" in data and isinstance(data["sections"], dict):
+                for section_name, section_content in data["sections"].items():
+                    if isinstance(section_content, list):
+                        # Join array items
+                        text = "\n\n".join(str(item) for item in section_content if item)
+                    else:
+                        text = self._extract_text_from_nested(section_content)
 
-            if not sections:
-                # If no sections, treat entire content as one document
-                content = data.get("content", "") or json.dumps(data, indent=2)
-                if content.strip():
+                    if text.strip():
+                        metadata = {
+                            "source": source,
+                            "title": title,
+                            "section": section_name,
+                            "file_type": "json",
+                            "file_path": str(file_path)
+                        }
+                        documents.append(Document(text=text.strip(), metadata=metadata))
+
+            # Strategy 2: AAD format - content dict
+            elif "content" in data:
+                content_obj = data["content"]
+                text = self._extract_text_from_nested(content_obj)
+
+                if text.strip():
+                    section_name = data.get("section", "Main Content")
+                    metadata = {
+                        "source": source,
+                        "title": title,
+                        "section": section_name,
+                        "file_type": "json",
+                        "file_path": str(file_path)
+                    }
+                    documents.append(Document(text=text.strip(), metadata=metadata))
+
+            # Strategy 3: Generic nested structure
+            else:
+                text = self._extract_text_from_nested(data)
+
+                if text.strip():
                     metadata = {
                         "source": source,
                         "title": title,
                         "file_type": "json",
                         "file_path": str(file_path)
                     }
-                    documents.append(Document(text=content.strip(), metadata=metadata))
-            else:
-                # Process each section
-                for idx, section in enumerate(sections, start=1):
-                    heading = section.get("heading", f"Section {idx}")
-                    content = section.get("content", "")
-
-                    if content.strip():
-                        metadata = {
-                            "source": source,
-                            "title": title,
-                            "section": heading,
-                            "file_type": "json",
-                            "file_path": str(file_path)
-                        }
-                        documents.append(Document(text=content.strip(), metadata=metadata))
+                    documents.append(Document(text=text.strip(), metadata=metadata))
 
             logger.info(f"Extracted {len(documents)} sections from {file_path.name}")
             return documents

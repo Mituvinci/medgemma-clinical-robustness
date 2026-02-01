@@ -8,32 +8,39 @@ This implements a sophisticated two-tier reasoning system:
 
 TIER 1: Orchestration (Gemini via Google ADK)
 - Framework: Google Agent Development Kit (ADK)
-- Model: Gemini 1.5 Flash
+- Model: Gemini Pro Latest (gemini-pro-latest)
 - Role: Workflow management, delegation, coordination
 - Handles: Agent routing, state management, tool orchestration
 
-TIER 2: Clinical Reasoning (MedGemma-27B Specialist)
-- Model: MedGemma-27B (via HuggingFace API)
+TIER 2: Clinical Reasoning (MedGemma-27B-IT Specialist)
+- Model: MedGemma-27B-IT (google/medgemma-27b-it via HuggingFace API)
 - Role: Medical diagnosis, clinical analysis, SOAP generation
 - Handles: All high-stakes medical reasoning tasks
 - Invoked via: FunctionTools (medgemma_triage_analysis, medgemma_guideline_synthesis, medgemma_clinical_diagnosis)
 
 Why This Architecture?
 ----------------------
-1. Competition Requirement: Uses MedGemma for medical reasoning (mandatory)
+1. Competition Requirement: Uses MedGemma-27B-IT for medical reasoning (mandatory)
 2. Google ADK Integration: Demonstrates advanced agent orchestration
-3. Best of Both Worlds: Gemini's orchestration + MedGemma's medical expertise
+3. Best of Both Worlds: Gemini Pro Latest orchestration + MedGemma-27B-IT medical expertise
 4. Production-Grade: Separates workflow management from domain expertise
 
 Agent Workflow:
 --------------
-1. Triage Agent (ADK/Gemini orchestrates → MedGemma analyzes completeness)
-2. Research Agent (ADK/Gemini orchestrates RAG → MedGemma synthesizes guidelines)
-3. Diagnostic Agent (ADK/Gemini orchestrates → MedGemma generates SOAP note)
-4. Root Coordinator (ADK/Gemini manages the entire workflow)
+1. Triage Agent (ADK/Gemini Pro Latest orchestrates → MedGemma-27B-IT analyzes completeness)
+2. Research Agent (ADK/Gemini Pro Latest orchestrates RAG → MedGemma-27B-IT synthesizes guidelines)
+3. Diagnostic Agent (ADK/Gemini Pro Latest orchestrates → MedGemma-27B-IT generates SOAP note)
+4. Root Coordinator (ADK/Gemini Pro Latest manages the entire workflow)
 
-This is the "Clinical Specialist Pattern": Gemini is the clinic manager,
-MedGemma is the specialist physician.
+Toggle Comparison Feature:
+--------------------------
+The system supports comparing MedGemma-27B-IT (default) vs Gemini Pro Latest for the
+three specialist agents. The orchestrator ALWAYS uses Gemini Pro Latest via Google ADK.
+- Default: All 3 agents use MedGemma-27B-IT for clinical reasoning
+- Toggle: Switch agents to use Gemini Pro Latest for baseline comparison
+
+This is the "Clinical Specialist Pattern": Gemini Pro Latest is the clinic manager,
+MedGemma-27B-IT is the specialist physician.
 """
 
 import logging

@@ -68,11 +68,31 @@ _retriever = Retriever()
 # MedGemma adapter (initialized lazily to avoid import-time errors)
 from src.agents.models.medgemma_adapter import MedGemmaAdapter
 _medgemma_specialist = None
+_agent_model_choice = "medgemma"  # Global: "medgemma" or "gemini"
 
 def _get_medgemma_specialist():
-    """Get or create MedGemma specialist (lazy initialization)."""
-    global _medgemma_specialist
-    if _medgemma_specialist is None:
+    """
+    Get or create specialist for clinical reasoning (lazy initialization).
+
+    Returns MedGemma (specialized) or Gemini (baseline) based on agent_model_choice.
+    """
+    global _medgemma_specialist, _agent_model_choice
+
+    # Check if we should use Gemini instead of MedGemma
+    if _agent_model_choice == "gemini":
+        # Use Gemini for baseline comparison
+        from src.agents.models.gemini_adapter import GeminiAdapter
+        logger.info("🔄 Using Gemini Pro for agent reasoning (baseline comparison)")
+        if _medgemma_specialist is None or not isinstance(_medgemma_specialist, GeminiAdapter):
+            _medgemma_specialist = GeminiAdapter(
+                model_id=settings.gemini_model_id,
+                api_key=settings.gemini_api_key
+            )
+        return _medgemma_specialist
+
+    # Use MedGemma (default/specialized)
+    if _medgemma_specialist is None or not isinstance(_medgemma_specialist, MedGemmaAdapter):
+        logger.info("🧬 Using MedGemma-27B-IT for agent reasoning (specialized)")
         _medgemma_specialist = MedGemmaAdapter(
             model_id=settings.medgemma_model_id,
             api_key=settings.huggingface_api_key
@@ -436,7 +456,10 @@ Your role is ORCHESTRATION, not clinical reasoning.
 Workflow:
 1. Use analyze_case_completeness tool to check for missing data
 2. If missing data found: MUST use medgemma_triage_analysis tool to get specialist assessment
-3. Return the MedGemma specialist's analysis to the coordinator
+3. IMPORTANT: After completing triage, you MUST transfer to ResearchAgent
+   - Use transfer_to_agent with agent_name='ResearchAgent'
+   - DO NOT transfer directly to DiagnosticAgent
+   - Research Agent must retrieve clinical guidelines before diagnosis
 
 CRITICAL: You are NOT the medical expert. Always delegate clinical reasoning
 to the MedGemma specialist via the medgemma_triage_analysis tool.
@@ -451,6 +474,7 @@ Output format:
 - List missing items (if any)
 - Include MedGemma specialist's clinical assessment
 - Recommendation: Proceed or Request Clarification
+- NEXT STEP: Transfer to ResearchAgent (mandatory)
 """,
         tools=[
             FunctionTool(analyze_case_completeness),
@@ -485,7 +509,10 @@ Workflow:
 1. Formulate effective search query from the clinical case
 2. Use retrieve_clinical_guidelines tool to query ChromaDB (1,492 chunks)
 3. MUST use medgemma_guideline_synthesis tool to have MedGemma interpret the guidelines
-4. Return MedGemma specialist's synthesis to the coordinator
+4. IMPORTANT: After completing research, you MUST transfer to DiagnosticAgent
+   - Use transfer_to_agent with agent_name='DiagnosticAgent'
+   - Pass the guideline synthesis results to diagnostic agent
+5. Return MedGemma specialist's synthesis to the coordinator
 
 CRITICAL: You retrieve documents, but MedGemma (the medical specialist) interprets them.
 Always delegate guideline synthesis to MedGemma via the medgemma_guideline_synthesis tool.
@@ -499,6 +526,7 @@ Output format:
 - Number of guidelines retrieved
 - MedGemma specialist's synthesis and recommendations
 - Specific citations (Source: Title)
+- NEXT STEP: Transfer to DiagnosticAgent with research results
 """,
         tools=[
             FunctionTool(retrieve_clinical_guidelines),
@@ -606,21 +634,25 @@ Your Sub-Agents:
 2. ResearchAgent - Orchestrates guideline retrieval (MedGemma synthesizes)
 3. DiagnosticAgent - Orchestrates diagnosis (MedGemma generates SOAP note)
 
-Workflow:
+MANDATORY WORKFLOW SEQUENCE (DO NOT SKIP ANY STEP):
 1. Receive clinical case from user
-2. Delegate to TriageAgent
-   - If MedGemma specialist identifies missing data: ASK USER for clarification
-   - If complete: Continue to next step
-3. Delegate to ResearchAgent to retrieve and synthesize guidelines
-4. Delegate to DiagnosticAgent for final SOAP note (MedGemma specialist)
-5. Return the MedGemma specialist's SOAP note to user
+2. FIRST: Always delegate to TriageAgent for analysis
+3. SECOND: Always delegate to ResearchAgent to retrieve clinical guidelines
+   - This step is MANDATORY even if case seems simple
+   - ResearchAgent must query ChromaDB for evidence-based guidelines
+4. THIRD: Delegate to DiagnosticAgent for final SOAP note
+   - DiagnosticAgent combines triage findings + research guidelines
+5. Return the final SOAP note to user
 
 CRITICAL RULES:
-- ALWAYS run Triage first
-- NEVER skip to diagnosis if missing critical data
-- When missing data found, ASK THE USER (agentic pause)
-- Sequential flow: Triage → Research → Diagnostic
-- Pass context between agents
+- YOU MUST FOLLOW THIS EXACT SEQUENCE: TriageAgent → ResearchAgent → DiagnosticAgent
+- NEVER SKIP ResearchAgent - guideline retrieval is mandatory for evidence-based diagnosis
+- NEVER let TriageAgent transfer directly to DiagnosticAgent
+- Each agent must complete before moving to next
+- Pass context between agents (triage results → research → diagnostic)
+
+ERROR TO AVOID: Do NOT allow TriageAgent to transfer directly to DiagnosticAgent.
+ResearchAgent MUST run between them to retrieve clinical guidelines.
 
 Your role is coordination. The clinical reasoning is done by MedGemma specialist.
 """,
@@ -647,21 +679,28 @@ class MedGemmaWorkflow:
     def __init__(
         self,
         model_name: str = "gemini-pro-latest",
-        use_medgemma: bool = True  # Always true - MedGemma is the specialist
+        use_medgemma: bool = True,  # MedGemma vs Gemini for agents
+        agent_model: str = "medgemma"  # "medgemma" or "gemini"
     ):
         """
         Initialize workflow.
 
         ARCHITECTURE NOTE:
-        - model_name: Gemini model for ADK orchestration (default: flash for cost/speed)
-        - MedGemma-27B is ALWAYS used for clinical reasoning (via FunctionTools)
+        - model_name: Gemini model for ADK orchestration
+        - agent_model: "medgemma" (specialized) or "gemini" (general baseline)
 
         Args:
             model_name: Gemini model for workflow orchestration
-            use_medgemma: Whether to use MedGemma specialist (always True)
+            use_medgemma: Whether to use MedGemma specialist
+            agent_model: "medgemma" or "gemini" for agent reasoning
         """
         self.model_name = model_name  # Gemini for orchestration
-        self.use_medgemma = use_medgemma  # MedGemma for clinical reasoning
+        self.use_medgemma = use_medgemma
+        self.agent_model = agent_model  # MedGemma or Gemini for agents
+
+        # Store for session naming
+        global _agent_model_choice
+        _agent_model_choice = agent_model
 
         # Set up API key in environment for Gemini
         import os
@@ -716,6 +755,14 @@ class MedGemmaWorkflow:
 
         logger.info(f"Running workflow for case: {case.case_id}")
 
+        # Create our session for logging BEFORE workflow (so we can log steps)
+        session = self.conversation_manager.create_session(
+            case_id=case.case_id,
+            model_name=self.model_name,
+            agent_model=self.agent_model  # For meaningful filename (medgemma or gemini)
+        )
+        session.set_initial_input(case.dict())
+
         # Prepare message as Content object
         from google.genai import types as genai_types
         content = genai_types.Content(
@@ -723,26 +770,156 @@ class MedGemmaWorkflow:
             parts=[genai_types.Part(text=user_message)]
         )
 
-        # Run agent workflow and collect responses
+        # Run agent workflow and collect responses + log each agent step
         response_text = ""
+        agent_steps = []  # Track each agent's response
+        current_agent = None
+
         async for event in self.runner.run_async(
             user_id=user_id,
             session_id=adk_session_id,
             new_message=content
         ):
+            # Try to identify which agent is responding
+            if hasattr(event, 'agent_name'):
+                current_agent = event.agent_name
+            elif hasattr(event, 'metadata') and isinstance(event.metadata, dict):
+                current_agent = event.metadata.get('agent_name', current_agent)
+
             # Collect responses from events
             if hasattr(event, 'content') and event.content:
                 if hasattr(event.content, 'parts'):
+                    event_text = ""
+                    function_calls = []
+
                     for part in event.content.parts:
-                        if hasattr(part, 'text') and part.text:  # Check not None
+                        # Handle text parts
+                        if hasattr(part, 'text') and part.text:
+                            event_text += part.text
                             response_text += part.text + "\n"
 
-        # Create our session for logging
-        session = self.conversation_manager.create_session(
-            case_id=case.case_id,
-            model_name=self.model_name
-        )
-        session.set_initial_input(case.dict())
+                        # Handle function calls (tool usage)
+                        if hasattr(part, 'function_call') and part.function_call:
+                            fc = part.function_call
+                            fc_name = fc.name if hasattr(fc, 'name') else "unknown"
+                            function_calls.append({
+                                "name": fc_name,
+                                "args": str(fc.args) if hasattr(fc, 'args') else "{}"
+                            })
+
+                    # Log this agent step if we have text OR function calls
+                    if event_text.strip() or function_calls:
+                        # Infer agent name from function calls
+                        agent_name = current_agent
+                        if not agent_name or agent_name == "UnknownAgent":
+                            # Detect from function calls
+                            for fc in function_calls:
+                                fc_name = fc["name"].lower()
+                                if "triage" in fc_name or "analyze_case" in fc_name:
+                                    agent_name = "TriageAgent"
+                                    break
+                                elif "retrieve_clinical_guidelines" in fc_name or "guideline_synthesis" in fc_name:
+                                    agent_name = "ResearchAgent"
+                                    break
+                                elif "clinical_diagnosis" in fc_name or "medgemma_clinical_diagnosis" in fc_name:
+                                    agent_name = "DiagnosticAgent"
+                                    break
+                                elif "transfer_to_agent" in fc_name:
+                                    # Extract target agent from args
+                                    try:
+                                        args_str = fc["args"]
+                                        if "TriageAgent" in args_str:
+                                            agent_name = "RootCoordinator"  # Transferring to Triage
+                                        elif "ResearchAgent" in args_str:
+                                            agent_name = "TriageAgent"  # Triage transferring to Research
+                                        elif "DiagnosticAgent" in args_str:
+                                            agent_name = "ResearchAgent"  # Research transferring to Diagnostic
+                                    except:
+                                        pass
+
+                            # If still unknown, try content analysis
+                            if not agent_name or agent_name == "UnknownAgent":
+                                text_lower = event_text.lower()
+                                if "triage" in text_lower[:200]:
+                                    agent_name = "TriageAgent"
+                                elif "research" in text_lower[:200] or "guideline" in text_lower[:200]:
+                                    agent_name = "ResearchAgent"
+                                elif "soap" in text_lower[:200] or "assessment" in text_lower[:200]:
+                                    agent_name = "DiagnosticAgent"
+                                else:
+                                    agent_name = "RootCoordinator"
+
+                        step_output = event_text.strip()
+                        if function_calls:
+                            step_output += f"\n\n[Tool Calls: {len(function_calls)}]\n"
+                            for fc in function_calls:
+                                step_output += f"  - {fc['name']}({fc['args'][:100]}...)\n"
+
+                        agent_steps.append({
+                            "agent": agent_name,
+                            "response": step_output,
+                            "function_calls": function_calls
+                        })
+
+                        # Add to session workflow steps
+                        session.add_step(
+                            agent_name=agent_name,
+                            step_data={
+                                "input": user_message if len(agent_steps) == 1 else "Previous agent output",
+                                "output": step_output,
+                                "function_calls": function_calls,
+                                "reasoning": f"{agent_name} processing",
+                                "metrics": {
+                                    "tokens_used": len(event_text.split()) if event_text else 0,
+                                    "latency_ms": 0
+                                }
+                            }
+                        )
+
+        # Retrieve full ADK session history for complete transparency
+        try:
+            adk_history = await self.runner.session_service.get_session(
+                app_name="MedGemma Clinical Assistant",
+                user_id=user_id,
+                session_id=adk_session_id
+            )
+
+            # Extract messages from ADK history
+            if adk_history and hasattr(adk_history, 'messages'):
+                for idx, msg in enumerate(adk_history.messages):
+                    msg_role = msg.role if hasattr(msg, 'role') else "unknown"
+                    msg_text = ""
+
+                    if hasattr(msg, 'content') and msg.content:
+                        if hasattr(msg.content, 'parts'):
+                            for part in msg.content.parts:
+                                if hasattr(part, 'text') and part.text:
+                                    msg_text += part.text
+
+                    if msg_text.strip():
+                        # Infer agent from message content
+                        agent_name = "User" if msg_role == "user" else "Agent"
+                        if "triage" in msg_text.lower()[:200]:
+                            agent_name = "TriageAgent"
+                        elif "research" in msg_text.lower()[:200] or "guideline" in msg_text.lower()[:200]:
+                            agent_name = "ResearchAgent"
+                        elif "diagnostic" in msg_text.lower()[:200] or "soap" in msg_text.lower()[:200]:
+                            agent_name = "DiagnosticAgent"
+
+                        # Add to session if not already logged
+                        if msg_role != "user":  # Don't duplicate user input
+                            session.add_step(
+                                agent_name=agent_name,
+                                step_data={
+                                    "role": msg_role,
+                                    "message_index": idx,
+                                    "output": msg_text.strip()[:2000],  # Limit length
+                                    "full_length": len(msg_text)
+                                }
+                            )
+
+        except Exception as e:
+            logger.warning(f"Could not retrieve ADK session history: {e}")
 
         # Extract final response
         result = {
@@ -750,14 +927,15 @@ class MedGemmaWorkflow:
             "adk_session_id": adk_session_id,
             "case_id": case.case_id,
             "response": response_text.strip(),
-            "model": self.model_name
+            "model": self.model_name,
+            "agent_steps_count": len(agent_steps)
         }
 
         # Complete session
         session.set_final_output(result)
         self.conversation_manager.complete_session(session.session_id, save=True)
 
-        logger.info(f"Workflow complete for case: {case.case_id}")
+        logger.info(f"Workflow complete for case: {case.case_id} ({len(agent_steps)} agent interactions logged)")
 
         return result
 
@@ -835,5 +1013,6 @@ def create_workflow(
     """
     return MedGemmaWorkflow(
         model_name=model_name,
-        use_medgemma=use_medgemma
+        use_medgemma=use_medgemma,
+        agent_model="medgemma"  # Default: use MedGemma for agents
     )

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     active_model: str = os.getenv("ACTIVE_MODEL", "medgemma")  # Options: medgemma, gemini, gpt4, claude
 
     # Model Configuration
-    medgemma_model_id: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-27b")
+    medgemma_model_id: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-27b-it")
     gemini_model_id: str = os.getenv("GEMINI_MODEL_ID", "gemini-pro")
     openai_model_id: str = os.getenv("OPENAI_MODEL_ID", "gpt-4-turbo")
     claude_model_id: str = os.getenv("CLAUDE_MODEL_ID", "claude-3-opus-20240229")

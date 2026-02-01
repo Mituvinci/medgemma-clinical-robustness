@@ -35,7 +35,8 @@ class ConversationSession:
         self,
         case_id: str,
         model_name: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        agent_model: Optional[str] = None
     ):
         """
         Initialize conversation session.
@@ -44,10 +45,12 @@ class ConversationSession:
             case_id: Unique case identifier
             model_name: LLM model being used
             session_id: Optional session ID (auto-generated if None)
+            agent_model: Agent model type (medgemma or gemini) for file naming
         """
-        self.session_id = session_id or self._generate_session_id()
         self.case_id = case_id
         self.model_name = model_name
+        self.agent_model = agent_model or "medgemma"
+        self.session_id = session_id or self._generate_session_id()
 
         self.timestamp_start = datetime.utcnow().isoformat() + "Z"
         self.timestamp_end = None
@@ -74,10 +77,16 @@ class ConversationSession:
         )
 
     def _generate_session_id(self) -> str:
-        """Generate unique session ID."""
+        """
+        Generate meaningful session ID.
+
+        Format: case_{case_id}_{agent_model}_{timestamp}
+        Example: case_test_adk_001_medgemma_20260201_014419
+        """
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        unique = str(uuid.uuid4())[:8]
-        return f"session_{timestamp}_{unique}"
+        # Clean case_id (remove special chars for filename safety)
+        safe_case_id = self.case_id.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        return f"case_{safe_case_id}_{self.agent_model}_{timestamp}"
 
     def set_initial_input(self, input_data: Dict[str, Any]):
         """
@@ -322,7 +331,8 @@ class ConversationManager:
     def create_session(
         self,
         case_id: str,
-        model_name: str
+        model_name: str,
+        agent_model: Optional[str] = None
     ) -> ConversationSession:
         """
         Create new conversation session.
@@ -330,13 +340,15 @@ class ConversationManager:
         Args:
             case_id: Case identifier
             model_name: Model name
+            agent_model: Agent model type (medgemma or gemini) for file naming
 
         Returns:
             New ConversationSession
         """
         session = ConversationSession(
             case_id=case_id,
-            model_name=model_name
+            model_name=model_name,
+            agent_model=agent_model
         )
 
         self.active_sessions[session.session_id] = session
@@ -391,7 +403,8 @@ class ConversationManager:
         Returns:
             List of session IDs
         """
-        session_files = list(self.storage_dir.glob("session_*.json"))
+        # Support both old (session_*) and new (case_*) filename formats
+        session_files = list(self.storage_dir.glob("*.json"))
         session_ids = []
 
         for filepath in session_files:

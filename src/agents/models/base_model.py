@@ -20,7 +20,7 @@ class BaseLLM(ABC):
         Initialize LLM adapter.
 
         Args:
-            model_id: Model identifier (e.g., "google/medgemma-27b")
+            model_id: Model identifier (e.g., "google/medgemma-27b-it")
             api_key: API key for the provider
             **kwargs: Additional provider-specific parameters
         """

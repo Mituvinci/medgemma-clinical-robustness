@@ -36,13 +36,13 @@ class MedGemmaApp:
         - Clinical Reasoning: MedGemma-27B (health-specialized)
         """
         self.workflow = create_workflow(
-            model_name="gemini-1.5-flash",  # ADK orchestration
+            model_name="gemini-pro-latest",  # ADK orchestration
             use_medgemma=True  # MedGemma for clinical reasoning
         )
         self.current_case = None
         self.conversation_history = []
 
-        logger.info("MedGemmaApp initialized (Hybrid: ADK+Gemini orchestration, MedGemma reasoning)")
+        logger.info("MedGemmaApp initialized (Hybrid: ADK+Gemini Pro orchestration, MedGemma reasoning)")
 
     def parse_case_file(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
@@ -550,7 +550,7 @@ class MedGemmaApp:
 
             gr.Markdown("""
             ---
-            **Clinical Reasoning:** MedGemma-27B (Health-Specialized) | **Orchestration:** Google ADK + Gemini 1.5 Flash
+            **Clinical Reasoning:** MedGemma-27B (Health-Specialized) | **Orchestration:** Google ADK + Gemini Pro
             **Knowledge Base:** ChromaDB (1,492 AAD + StatPearls Guideline Chunks) | **Architecture:** Manager-Specialist Pattern
             **Built for:** [Med-Gemma Impact Challenge](https://www.kaggle.com/competitions/med-gemma-impact-challenge)
             """)

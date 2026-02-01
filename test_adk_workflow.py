@@ -47,11 +47,11 @@ async def test_adk_workflow_async():
     # Create Google ADK workflow
     print("\n3. Initializing Hybrid ADK + MedGemma workflow...")
     workflow = create_workflow(
-        model_name="gemini-1.5-flash",  # ADK orchestration
+        model_name="gemini-pro-latest",  # ADK orchestration
         use_medgemma=True  # MedGemma clinical reasoning
     )
     print("   [OK] Hybrid architecture initialized")
-    print("   [OK] Orchestration: Google ADK with Gemini 1.5 Flash")
+    print("   [OK] Orchestration: Google ADK with Gemini Pro Latest")
     print("   [OK] Clinical Reasoning: MedGemma-27B (Health-Specialized)")
     print("\n   [OK] Root Coordinator with 3 sub-agents:")
     print("       - TriageAgent (ADK orchestrates → MedGemma analyzes)")

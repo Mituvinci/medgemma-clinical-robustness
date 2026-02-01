@@ -65,9 +65,19 @@ logger = logging.getLogger(__name__)
 # Initialize retriever (shared across agents)
 _retriever = Retriever()
 
-# Initialize MedGemma adapter (THE SPECIALIST)
+# MedGemma adapter (initialized lazily to avoid import-time errors)
 from src.agents.models.medgemma_adapter import MedGemmaAdapter
-_medgemma_specialist = MedGemmaAdapter()
+_medgemma_specialist = None
+
+def _get_medgemma_specialist():
+    """Get or create MedGemma specialist (lazy initialization)."""
+    global _medgemma_specialist
+    if _medgemma_specialist is None:
+        _medgemma_specialist = MedGemmaAdapter(
+            model_id=settings.medgemma_model_id,
+            api_key=settings.huggingface_api_key
+        )
+    return _medgemma_specialist
 
 def retrieve_clinical_guidelines(
     query: str,
@@ -226,7 +236,8 @@ Your Task:
 Provide your analysis as a structured response."""
 
     try:
-        response = _medgemma_specialist.generate(
+        specialist = _get_medgemma_specialist()
+        response = specialist.generate(
             prompt=prompt,
             max_tokens=500,
             temperature=0.3
@@ -238,9 +249,11 @@ Provide your analysis as a structured response."""
             "specialist_used": "MedGemma-27B"
         }
     except Exception as e:
-        logger.error(f"MedGemma triage analysis failed: {e}")
+        logger.error(f"MedGemma triage analysis failed: {e}", exc_info=True)
+        import traceback
+        error_details = traceback.format_exc()
         return {
-            "medgemma_analysis": f"Error calling MedGemma: {e}",
+            "medgemma_analysis": f"Error calling MedGemma: {e}\n\nDetails:\n{error_details}",
             "missing_items": missing_items,
             "specialist_used": "MedGemma-27B (failed)"
         }
@@ -287,7 +300,8 @@ Your Task:
 Provide a structured synthesis focusing on differential diagnosis support."""
 
     try:
-        response = _medgemma_specialist.generate(
+        specialist = _get_medgemma_specialist()
+        response = specialist.generate(
             prompt=prompt,
             max_tokens=800,
             temperature=0.4
@@ -299,9 +313,11 @@ Provide a structured synthesis focusing on differential diagnosis support."""
             "specialist_used": "MedGemma-27B"
         }
     except Exception as e:
-        logger.error(f"MedGemma guideline synthesis failed: {e}")
+        logger.error(f"MedGemma guideline synthesis failed: {e}", exc_info=True)
+        import traceback
+        error_details = traceback.format_exc()
         return {
-            "medgemma_synthesis": f"Error calling MedGemma: {e}",
+            "medgemma_synthesis": f"Error calling MedGemma: {e}\n\nDetails:\n{error_details}",
             "guidelines_count": len(retrieved_guidelines),
             "specialist_used": "MedGemma-27B (failed)"
         }
@@ -369,7 +385,8 @@ Confidence Scoring Guidelines:
 Format your response as a structured SOAP note with clear section headers."""
 
     try:
-        response = _medgemma_specialist.generate(
+        specialist = _get_medgemma_specialist()
+        response = specialist.generate(
             prompt=prompt,
             max_tokens=1500,
             temperature=0.3
@@ -381,9 +398,11 @@ Format your response as a structured SOAP note with clear section headers."""
             "reasoning_engine": "MedGemma-27B (Health-Specialized)"
         }
     except Exception as e:
-        logger.error(f"MedGemma clinical diagnosis failed: {e}")
+        logger.error(f"MedGemma clinical diagnosis failed: {e}", exc_info=True)
+        import traceback
+        error_details = traceback.format_exc()
         return {
-            "soap_note": f"Error calling MedGemma specialist: {e}\n\nFallback: Unable to generate diagnosis.",
+            "soap_note": f"Error calling MedGemma specialist: {e}\n\nDetails:\n{error_details}\n\nFallback: Unable to generate diagnosis.",
             "specialist_used": "MedGemma-27B (failed)",
             "reasoning_engine": "Error"
         }
@@ -393,7 +412,7 @@ Format your response as a structured SOAP note with clear section headers."""
 # AGENT DEFINITIONS
 # ============================================================================
 
-def create_triage_agent(model_name: str = "gemini-1.5-flash") -> Agent:
+def create_triage_agent(model_name: str = "gemini-pro-latest") -> Agent:
     """
     Create Triage Agent using Google ADK.
 
@@ -441,7 +460,7 @@ Output format:
     )
 
 
-def create_research_agent(model_name: str = "gemini-1.5-flash") -> Agent:
+def create_research_agent(model_name: str = "gemini-pro-latest") -> Agent:
     """
     Create Research Agent using Google ADK.
 
@@ -489,7 +508,7 @@ Output format:
     )
 
 
-def create_diagnostic_agent(model_name: str = "gemini-1.5-flash") -> Agent:
+def create_diagnostic_agent(model_name: str = "gemini-pro-latest") -> Agent:
     """
     Create Diagnostic Agent using Google ADK.
 
@@ -537,7 +556,7 @@ Simply pass through the MedGemma specialist's output without modification.
 
 
 def create_root_coordinator(
-    model_name: str = "gemini-1.5-flash",
+    model_name: str = "gemini-pro-latest",
     triage_agent: Optional[Agent] = None,
     research_agent: Optional[Agent] = None,
     diagnostic_agent: Optional[Agent] = None
@@ -627,7 +646,7 @@ class MedGemmaWorkflow:
 
     def __init__(
         self,
-        model_name: str = "gemini-1.5-flash",
+        model_name: str = "gemini-pro-latest",
         use_medgemma: bool = True  # Always true - MedGemma is the specialist
     ):
         """
@@ -797,7 +816,7 @@ class MedGemmaWorkflow:
 # ============================================================================
 
 def create_workflow(
-    model_name: str = "gemini-1.5-flash",
+    model_name: str = "gemini-pro-latest",
     use_medgemma: bool = True
 ) -> MedGemmaWorkflow:
     """

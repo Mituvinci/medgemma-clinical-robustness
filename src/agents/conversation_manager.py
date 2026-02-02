@@ -127,25 +127,137 @@ class ConversationSession:
         self.initial_input = json.loads(filtered)
         self.pii_redacted = True
 
+    def _get_provider(self, model_name: Optional[str]) -> Optional[str]:
+        """
+        Determine provider from model name.
+
+        Args:
+            model_name: Model identifier
+
+        Returns:
+            Provider name or None
+        """
+        if not model_name:
+            return None
+        model_lower = model_name.lower()
+        if "gemini" in model_lower:
+            return "google_genai"
+        if "medgemma" in model_lower or "google/" in model_name:
+            return "huggingface_transformers"
+        if "gpt" in model_lower or "openai" in model_lower:
+            return "openai"
+        if "claude" in model_lower:
+            return "anthropic"
+        return "unknown"
+
     def add_step(
         self,
         agent_name: str,
-        step_data: Dict[str, Any]
+        step_data: Dict[str, Any],
+        orchestrator_model: str = "gemini-pro-latest",
+        specialist_model: Optional[str] = None,
+        input_reference: Optional[Dict[str, Any]] = None,
+        step_role: str = "standard",
+        is_final: bool = False
     ):
         """
-        Add a workflow step.
+        Add workflow step with explicit model tracking and causality.
+
+        Implements audit-grade logging with:
+        - Dual-model tracking (orchestrator vs specialist)
+        - Input causality (references, not duplication)
+        - Constrained decision rationale
+        - Trust metadata for verification
 
         Args:
-            agent_name: Name of agent (triage, research, diagnostic)
-            step_data: Step details including input, output, reasoning
+            agent_name: Name of agent
+            step_data: Step data (execution, output, metrics, etc.)
+            orchestrator_model: Model used for workflow coordination
+            specialist_model: Model used for clinical reasoning (if any)
+            input_reference: Reference to previous step(s)
+            step_role: Role of this step (triage, research, diagnostic, final_resolution)
+            is_final: Whether this is the final resolution step
         """
         self.current_step += 1
 
         step = {
-            "step": self.current_step,
+            "step_id": self.current_step,
             "agent": agent_name,
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            **step_data
+
+            # Model tracking (CORE TRUST ANCHOR)
+            "models": {
+                "orchestrator": {
+                    "name": orchestrator_model,
+                    "provider": self._get_provider(orchestrator_model),
+                    "role": "workflow_coordination"
+                },
+                "specialist": {
+                    "name": specialist_model,
+                    "provider": self._get_provider(specialist_model),
+                    "role": "clinical_reasoning"
+                } if specialist_model else None
+            },
+
+            # Input causality (NO DUPLICATION)
+            "input": {
+                "source_type": input_reference.get("source_type", "unknown") if input_reference else "user_input",
+                "reference": input_reference.get("reference") if input_reference else None,
+                "summary": step_data.get("input_summary", "")
+            },
+
+            # Execution details
+            "execution": {
+                "orchestrator_action": step_data.get("orchestrator_action", "unknown"),
+                "tools_called": step_data.get("tools_called", [])
+            },
+
+            # Output
+            "output": {
+                "type": step_data.get("output_type", "unknown"),
+                **step_data.get("output", {}),
+
+                # Clear attribution
+                "produced_by": {
+                    "assembled_by": "orchestrator",
+                    "clinical_content_by": specialist_model,
+                    "reasoning_source_step": input_reference.get("reference", {}).get("step_id") if input_reference and input_reference.get("reference") else None
+                } if is_final else (
+                    "specialist" if specialist_model else "orchestrator"
+                )
+            },
+
+            # Constrained rationale (not free-form reasoning)
+            "decision_rationale": {
+                "summary": step_data.get("decision_rationale_summary", ""),
+                "clinical_basis": step_data.get("clinical_basis", ""),
+                "guideline_reference": step_data.get("guideline_reference")
+            } if step_data.get("decision_rationale_summary") else None,
+
+            # Step metadata
+            "step_metadata": {
+                "step_role": step_role,
+                "is_final_resolution": is_final,
+                "next_step_suggestion": step_data.get("next_step"),
+                **step_data.get("metadata", {})
+            },
+
+            # Trust metadata (VERIFICATION ANCHOR)
+            "trust_metadata": {
+                "clinical_reasoning_by_specialist": specialist_model is not None,
+                "specialist_model": specialist_model,
+                "orchestrator_clinical_role": "none" if specialist_model else "coordinator"
+            },
+
+            # Metrics with model breakdown
+            "metrics": {
+                "orchestrator_tokens": step_data.get("orchestrator_tokens", 0),
+                "specialist_tokens": step_data.get("specialist_tokens", 0),
+                "total_tokens": step_data.get("tokens_used", 0),
+                "orchestrator_latency_ms": step_data.get("orchestrator_latency_ms", 0),
+                "specialist_latency_ms": step_data.get("specialist_latency_ms", 0),
+                "total_latency_ms": step_data.get("latency_ms", 0)
+            }
         }
 
         # Apply PII filtering to entire step
@@ -154,13 +266,11 @@ class ConversationSession:
 
         self.workflow_steps.append(step)
 
-        # Update metrics
-        if "metrics" in step_data:
-            metrics = step_data["metrics"]
-            self.total_tokens += metrics.get("tokens_used", 0)
-            self.total_latency_ms += metrics.get("latency_ms", 0)
+        # Update totals
+        self.total_tokens += step["metrics"]["total_tokens"]
+        self.total_latency_ms += step["metrics"]["total_latency_ms"]
 
-        logger.debug(f"Added step {self.current_step}: {agent_name}")
+        logger.debug(f"Added step {self.current_step}: {agent_name} (role: {step_role})")
 
     def set_final_output(self, output_data: Dict[str, Any]):
         """
@@ -215,12 +325,353 @@ class ConversationSession:
         """
         return json.dumps(self.to_dict(), indent=2)
 
+    def to_txt(self) -> str:
+        """
+        Convert session to human-readable plain text report.
+
+        Returns:
+            Plain text report
+        """
+        lines = []
+        lines.append("=" * 70)
+        lines.append("MEDGEMMA CLINICAL WORKFLOW SESSION REPORT")
+        lines.append("=" * 70)
+        lines.append("")
+        lines.append(f"Session ID:    {self.session_id}")
+        lines.append(f"Case ID:       {self.case_id}")
+        lines.append(f"Model:         {self.model_name}")
+        lines.append(f"Started:       {self.timestamp_start}")
+        lines.append(f"Ended:         {self.timestamp_end or 'In Progress'}")
+        lines.append(f"Status:        {'Completed' if self.completed else 'In Progress'}")
+        lines.append("")
+
+        # Initial Input
+        lines.append("-" * 70)
+        lines.append("INITIAL INPUT")
+        lines.append("-" * 70)
+        if self.initial_input:
+            for key, value in self.initial_input.items():
+                if key != 'image_data':  # Skip binary data
+                    lines.append(f"{key}: {value}")
+        lines.append("")
+
+        # Workflow Steps
+        lines.append("-" * 70)
+        lines.append("WORKFLOW STEPS")
+        lines.append("-" * 70)
+        for step in self.workflow_steps:
+            step_id = step.get('step_id', step.get('step', '?'))
+            agent = step.get('agent', 'UnknownAgent')
+            step_role = step.get('step_metadata', {}).get('step_role', 'unknown')
+            is_final = step.get('step_metadata', {}).get('is_final_resolution', False)
+
+            lines.append(f"\nStep {step_id}: {agent} [{step_role}]" + (" [FINAL]" if is_final else ""))
+            lines.append(f"Timestamp: {step.get('timestamp', 'N/A')}")
+
+            # Model tracking
+            if 'models' in step:
+                models = step['models']
+                orch = models.get('orchestrator', {})
+                spec = models.get('specialist')
+
+                lines.append(f"\nModels Used:")
+                lines.append(f"  Orchestrator: {orch.get('name', 'N/A')} (role: {orch.get('role', 'N/A')})")
+                if spec:
+                    lines.append(f"  Specialist:   {spec.get('name', 'N/A')} (role: {spec.get('role', 'N/A')})")
+                else:
+                    lines.append(f"  Specialist:   None (orchestrator-only step)")
+
+            # Input reference
+            if 'input' in step:
+                input_info = step['input']
+                lines.append(f"\nInput:")
+                lines.append(f"  Source: {input_info.get('source_type', 'N/A')}")
+                if input_info.get('reference'):
+                    ref = input_info['reference']
+                    lines.append(f"  Reference: Step {ref.get('step_id')} ({ref.get('agent')})")
+                lines.append(f"  Summary: {input_info.get('summary', 'N/A')}")
+
+            # Decision rationale
+            if step.get('decision_rationale'):
+                rationale = step['decision_rationale']
+                lines.append(f"\nDecision Rationale:")
+                lines.append(f"  {rationale.get('summary', 'N/A')}")
+                if rationale.get('clinical_basis'):
+                    lines.append(f"  Clinical Basis: {rationale['clinical_basis']}")
+
+            # Output
+            if step.get('output'):
+                lines.append(f"\nOutput:")
+                output = step['output']
+                lines.append(f"  Type: {output.get('type', 'N/A')}")
+
+                # Show who produced it
+                produced_by = output.get('produced_by')
+                if isinstance(produced_by, dict):
+                    lines.append(f"  Assembled by: {produced_by.get('assembled_by', 'N/A')}")
+                    lines.append(f"  Clinical content by: {produced_by.get('clinical_content_by', 'N/A')}")
+                else:
+                    lines.append(f"  Produced by: {produced_by}")
+
+            # Metrics
+            if step.get('metrics'):
+                metrics = step['metrics']
+                lines.append(f"\nMetrics:")
+                lines.append(f"  Orchestrator: {metrics.get('orchestrator_tokens', 0)} tokens, {metrics.get('orchestrator_latency_ms', 0)} ms")
+                lines.append(f"  Specialist:   {metrics.get('specialist_tokens', 0)} tokens, {metrics.get('specialist_latency_ms', 0)} ms")
+                lines.append(f"  Total:        {metrics.get('total_tokens', 0)} tokens, {metrics.get('total_latency_ms', 0)} ms")
+
+            lines.append("")
+
+        # Final Output
+        if self.final_output:
+            lines.append("-" * 70)
+            lines.append("FINAL OUTPUT")
+            lines.append("-" * 70)
+            for key, value in self.final_output.items():
+                if isinstance(value, dict):
+                    lines.append(f"{key}:")
+                    for k, v in value.items():
+                        lines.append(f"  {k}: {v}")
+                else:
+                    lines.append(f"{key}: {value}")
+            lines.append("")
+
+        # Summary Metrics
+        lines.append("-" * 70)
+        lines.append("SUMMARY METRICS")
+        lines.append("-" * 70)
+
+        # Calculate model-specific totals
+        orch_tokens = sum(s.get('metrics', {}).get('orchestrator_tokens', 0) for s in self.workflow_steps)
+        spec_tokens = sum(s.get('metrics', {}).get('specialist_tokens', 0) for s in self.workflow_steps)
+        orch_latency = sum(s.get('metrics', {}).get('orchestrator_latency_ms', 0) for s in self.workflow_steps)
+        spec_latency = sum(s.get('metrics', {}).get('specialist_latency_ms', 0) for s in self.workflow_steps)
+
+        lines.append(f"Total Steps:         {self.current_step}")
+        lines.append(f"")
+        lines.append(f"Orchestrator Tokens: {orch_tokens}")
+        lines.append(f"Specialist Tokens:   {spec_tokens}")
+        lines.append(f"Total Tokens:        {self.total_tokens}")
+        lines.append(f"")
+        lines.append(f"Orchestrator Time:   {orch_latency} ms ({orch_latency/1000:.2f} sec)")
+        lines.append(f"Specialist Time:     {spec_latency} ms ({spec_latency/1000:.2f} sec)")
+        lines.append(f"Total Latency:       {self.total_latency_ms} ms ({self.total_latency_ms/1000:.2f} sec)")
+        lines.append(f"PII Redacted:        {self.pii_redacted}")
+        lines.append("")
+
+        # Trust Verification Summary
+        lines.append("-" * 70)
+        lines.append("TRUST VERIFICATION SUMMARY")
+        lines.append("-" * 70)
+
+        clinical_steps = [s for s in self.workflow_steps if s.get('models', {}).get('specialist')]
+        orchestrator_only = [s for s in self.workflow_steps if not s.get('models', {}).get('specialist')]
+        final_steps = [s for s in self.workflow_steps if s.get('step_metadata', {}).get('is_final_resolution')]
+
+        lines.append(f"Clinical Reasoning Steps:     {len(clinical_steps)}")
+        lines.append(f"Orchestration-Only Steps:     {len(orchestrator_only)}")
+        lines.append(f"Final Resolution Steps:       {len(final_steps)}")
+        lines.append(f"")
+
+        if clinical_steps:
+            specialist_model = clinical_steps[0].get('models', {}).get('specialist', {}).get('name', 'unknown')
+            lines.append(f"Clinical Reasoning Performed By: {specialist_model}")
+
+        if final_steps:
+            final_step = final_steps[0]
+            produced_by = final_step.get('output', {}).get('produced_by', {})
+            if isinstance(produced_by, dict):
+                lines.append(f"Final Answer Assembled By:       {produced_by.get('assembled_by', 'N/A')}")
+                lines.append(f"Final Clinical Content By:       {produced_by.get('clinical_content_by', 'N/A')}")
+
+        lines.append("")
+        lines.append("=" * 70)
+
+        return '\n'.join(lines)
+
+    def to_markdown(self) -> str:
+        """
+        Convert session to human-readable Markdown report.
+
+        Returns:
+            Markdown formatted report
+        """
+        lines = []
+        lines.append("# MedGemma Clinical Workflow Session Report")
+        lines.append("")
+        lines.append("## Session Information")
+        lines.append("")
+        lines.append(f"- **Session ID:** `{self.session_id}`")
+        lines.append(f"- **Case ID:** `{self.case_id}`")
+        lines.append(f"- **Model:** {self.model_name}")
+        lines.append(f"- **Started:** {self.timestamp_start}")
+        lines.append(f"- **Ended:** {self.timestamp_end or 'In Progress'}")
+        lines.append(f"- **Status:** {'✅ Completed' if self.completed else '⏳ In Progress'}")
+        lines.append("")
+
+        # Initial Input
+        lines.append("## Initial Input")
+        lines.append("")
+        if self.initial_input:
+            lines.append("```json")
+            filtered_input = {k: v for k, v in self.initial_input.items() if k != 'image_data'}
+            lines.append(json.dumps(filtered_input, indent=2))
+            lines.append("```")
+        lines.append("")
+
+        # Workflow Steps
+        lines.append("## Workflow Steps")
+        lines.append("")
+        for step in self.workflow_steps:
+            step_id = step.get('step_id', step.get('step', '?'))
+            agent = step.get('agent', 'UnknownAgent')
+            step_role = step.get('step_metadata', {}).get('step_role', 'unknown')
+            is_final = step.get('step_metadata', {}).get('is_final_resolution', False)
+
+            final_badge = " 🎯 **FINAL**" if is_final else ""
+            lines.append(f"### Step {step_id}: {agent} `[{step_role}]`{final_badge}")
+            lines.append(f"**Timestamp:** {step.get('timestamp', 'N/A')}")
+            lines.append("")
+
+            # Model tracking
+            if 'models' in step:
+                models = step['models']
+                orch = models.get('orchestrator', {})
+                spec = models.get('specialist')
+
+                lines.append("**Models Used:**")
+                lines.append(f"- **Orchestrator:** `{orch.get('name', 'N/A')}` ({orch.get('role', 'N/A')})")
+                if spec:
+                    lines.append(f"- **Specialist:** `{spec.get('name', 'N/A')}` ({spec.get('role', 'N/A')})")
+                else:
+                    lines.append(f"- **Specialist:** None (orchestrator-only step)")
+                lines.append("")
+
+            # Input reference
+            if 'input' in step:
+                input_info = step['input']
+                lines.append("**Input:**")
+                lines.append(f"- Source: `{input_info.get('source_type', 'N/A')}`")
+                if input_info.get('reference'):
+                    ref = input_info['reference']
+                    lines.append(f"- Reference: Step {ref.get('step_id')} ({ref.get('agent')})")
+                lines.append(f"- Summary: {input_info.get('summary', 'N/A')}")
+                lines.append("")
+
+            # Decision rationale
+            if step.get('decision_rationale'):
+                rationale = step['decision_rationale']
+                lines.append("**Decision Rationale:**")
+                lines.append(f"> {rationale.get('summary', 'N/A')}")
+                if rationale.get('clinical_basis'):
+                    lines.append(f">")
+                    lines.append(f"> Clinical Basis: {rationale['clinical_basis']}")
+                lines.append("")
+
+            # Output
+            if step.get('output'):
+                output = step['output']
+                lines.append("**Output:**")
+                lines.append(f"- Type: `{output.get('type', 'N/A')}`")
+
+                # Show who produced it
+                produced_by = output.get('produced_by')
+                if isinstance(produced_by, dict):
+                    lines.append(f"- Assembled by: {produced_by.get('assembled_by', 'N/A')}")
+                    lines.append(f"- Clinical content by: `{produced_by.get('clinical_content_by', 'N/A')}`")
+                else:
+                    lines.append(f"- Produced by: {produced_by}")
+                lines.append("")
+
+            # Metrics
+            if step.get('metrics'):
+                metrics = step['metrics']
+                lines.append("**Metrics:**")
+                lines.append("")
+                lines.append("| Model | Tokens | Latency |")
+                lines.append("|-------|--------|---------|")
+                lines.append(f"| Orchestrator | {metrics.get('orchestrator_tokens', 0)} | {metrics.get('orchestrator_latency_ms', 0)} ms |")
+                lines.append(f"| Specialist | {metrics.get('specialist_tokens', 0)} | {metrics.get('specialist_latency_ms', 0)} ms |")
+                lines.append(f"| **Total** | **{metrics.get('total_tokens', 0)}** | **{metrics.get('total_latency_ms', 0)} ms** |")
+                lines.append("")
+
+        # Final Output
+        if self.final_output:
+            lines.append("## Final Output")
+            lines.append("")
+            lines.append("```json")
+            lines.append(json.dumps(self.final_output, indent=2))
+            lines.append("```")
+            lines.append("")
+
+        # Summary Metrics
+        lines.append("## Summary Metrics")
+        lines.append("")
+
+        # Calculate model-specific totals
+        orch_tokens = sum(s.get('metrics', {}).get('orchestrator_tokens', 0) for s in self.workflow_steps)
+        spec_tokens = sum(s.get('metrics', {}).get('specialist_tokens', 0) for s in self.workflow_steps)
+        orch_latency = sum(s.get('metrics', {}).get('orchestrator_latency_ms', 0) for s in self.workflow_steps)
+        spec_latency = sum(s.get('metrics', {}).get('specialist_latency_ms', 0) for s in self.workflow_steps)
+
+        lines.append("| Metric | Orchestrator | Specialist | Total |")
+        lines.append("|--------|--------------|------------|-------|")
+        lines.append(f"| Tokens | {orch_tokens} | {spec_tokens} | {self.total_tokens} |")
+        lines.append(f"| Latency (ms) | {orch_latency} | {spec_latency} | {self.total_latency_ms} |")
+        lines.append(f"| Latency (sec) | {orch_latency/1000:.2f} | {spec_latency/1000:.2f} | {self.total_latency_ms/1000:.2f} |")
+        lines.append("")
+        lines.append(f"- **Total Steps:** {self.current_step}")
+        lines.append(f"- **PII Redacted:** {'Yes' if self.pii_redacted else 'No'}")
+        lines.append("")
+
+        # Trust Verification Summary
+        lines.append("## Trust Verification Summary")
+        lines.append("")
+
+        clinical_steps = [s for s in self.workflow_steps if s.get('models', {}).get('specialist')]
+        orchestrator_only = [s for s in self.workflow_steps if not s.get('models', {}).get('specialist')]
+        final_steps = [s for s in self.workflow_steps if s.get('step_metadata', {}).get('is_final_resolution')]
+
+        lines.append(f"- **Clinical Reasoning Steps:** {len(clinical_steps)}")
+        lines.append(f"- **Orchestration-Only Steps:** {len(orchestrator_only)}")
+        lines.append(f"- **Final Resolution Steps:** {len(final_steps)}")
+        lines.append("")
+
+        if clinical_steps:
+            specialist_model = clinical_steps[0].get('models', {}).get('specialist', {}).get('name', 'unknown')
+            lines.append(f"**Clinical Reasoning Performed By:** `{specialist_model}`")
+            lines.append("")
+
+        if final_steps:
+            final_step = final_steps[0]
+            produced_by = final_step.get('output', {}).get('produced_by', {})
+            if isinstance(produced_by, dict):
+                lines.append(f"**Final Answer:**")
+                lines.append(f"- Assembled by: {produced_by.get('assembled_by', 'N/A')}")
+                lines.append(f"- Clinical content by: `{produced_by.get('clinical_content_by', 'N/A')}`")
+                lines.append("")
+
+        lines.append("---")
+        lines.append("")
+        lines.append(f"*Generated: {datetime.utcnow().isoformat()}Z*")
+
+        return '\n'.join(lines)
+
     def save(self, directory: Optional[Path] = None):
         """
-        Save session to JSON file.
+        Save session to JSON, TXT, and Markdown files.
+
+        Creates three files with the same base name:
+        - {session_id}.json - Machine-readable ground truth
+        - {session_id}.txt  - Human-readable plain text report
+        - {session_id}.md   - Human-readable Markdown report
 
         Args:
             directory: Directory to save to (default: logs/sessions/)
+
+        Returns:
+            Path to JSON file
         """
         if directory is None:
             directory = Path(settings.log_dir) / "sessions"
@@ -228,14 +679,29 @@ class ConversationSession:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
 
-        # Filename: session_id.json
-        filepath = directory / f"{self.session_id}.json"
+        base_path = directory / self.session_id
 
-        with open(filepath, 'w', encoding='utf-8') as f:
+        # Save JSON (ground truth)
+        json_path = base_path.with_suffix('.json')
+        with open(json_path, 'w', encoding='utf-8') as f:
             f.write(self.to_json())
 
-        logger.info(f"Saved session to: {filepath}")
-        return filepath
+        # Save TXT (human-readable)
+        txt_path = base_path.with_suffix('.txt')
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write(self.to_txt())
+
+        # Save Markdown (human-readable)
+        md_path = base_path.with_suffix('.md')
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write(self.to_markdown())
+
+        logger.info(f"Saved session to:")
+        logger.info(f"  JSON: {json_path}")
+        logger.info(f"  TXT:  {txt_path}")
+        logger.info(f"  MD:   {md_path}")
+
+        return json_path
 
     @classmethod
     def load(cls, session_id: str, directory: Optional[Path] = None) -> 'ConversationSession':

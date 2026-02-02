@@ -8,53 +8,219 @@ This "Partner-Style" Clinical Assistant uses a hierarchical multi-agent workflow
 1. Identify missing clinical context (History, Physical Exam, Images)
 2. Proactively request missing data before making diagnostic decisions
 3. Ground reasoning in evidence-based dermatology guidelines via RAG (Retrieval-Augmented Generation)
-4. Generate structured SOAP notes with transparent reasoning
+4. Generate structured SOAP notes with transparent reasoning and full audit trails
 
 ## Architecture
 
-### Multi-Agent System
-- **Triage Agent**: Analyzes input for missing clinical data and triggers clarification requests
-- **Research Agent**: Queries ChromaDB vector store for relevant AAD/StatPearls guidelines
-- **Diagnostic Agent**: Synthesizes information into structured SOAP notes with differential diagnoses
+### Hybrid Two-Tier System
+
+**TIER 1: Orchestration (Google ADK + Gemini Pro Latest)**
+- **Framework**: Google Agent Development Kit (ADK) v1.23.0
+- **Model**: Gemini Pro Latest
+- **Role**: Workflow management, agent routing, tool coordination
+- **Responsibility**: Delegates tasks but does NOT perform clinical reasoning
+
+**TIER 2: Clinical Reasoning (MedGemma-27B-IT Specialist)**
+- **Model**: MedGemma-27B-IT via Hugging Face Transformers
+- **Role**: Medical diagnosis, clinical analysis, SOAP generation
+- **Responsibility**: ALL high-stakes medical reasoning
+- **Invoked via**: FunctionTools (`medgemma_triage_analysis`, `medgemma_guideline_synthesis`, `medgemma_clinical_diagnosis`)
+
+### Why This Architecture?
+
+1. **Competition Requirement**: MedGemma-27B-IT performs all clinical reasoning (mandatory)
+2. **Best of Both Worlds**: Gemini's advanced orchestration + MedGemma's medical expertise
+3. **Production-Grade**: Separates workflow management from domain-specific expertise
+4. **Full Transparency**: Every step logged with explicit model attribution
+
+### Multi-Agent Workflow
+
+**Root Coordinator (Gemini Pro Latest)**
+- Manages overall workflow
+- Delegates to three specialized agents
+
+**Triage Agent**
+- Step 1: Gemini orchestrates case completeness check
+- Step 2: MedGemma analyzes clinical data and identifies missing information
+- Step 3: Gemini summarizes and delegates to Research Agent
+
+**Research Agent**
+- Step 1: Gemini retrieves clinical guidelines from ChromaDB (RAG)
+- Step 2: Gemini may refine search query (autonomous retrieval)
+- Step 3: MedGemma synthesizes guidelines with case data
+- Step 4: Gemini delegates to Diagnostic Agent
+
+**Diagnostic Agent**
+- Step 1: MedGemma generates complete SOAP note with differential diagnosis
+- Step 2: Gemini assembles final output
 
 ### Technology Stack
-- **Foundation Models**: MedGemma-27B-IT (Hugging Face) and Gemini Pro Latest (Google)
-- **Agent Framework**: Google Agent Development Kit (ADK) v1.23.0 - Latest stable release with improved telemetry and async support
-- **Vector Database**: ChromaDB v1.x with sentence-transformers embeddings
-- **UI**: Gradio v4.12.0 (multimodal interface for images, text, and chat)
+- **Clinical Reasoning**: MedGemma-27B-IT (google/medgemma-27b-it via Hugging Face)
+- **Workflow Orchestration**: Gemini Pro Latest (gemini-pro-latest via Google GenAI)
+- **Agent Framework**: Google Agent Development Kit (ADK) v1.23.0
+- **Vector Database**: ChromaDB v1.4.1 with sentence-transformers embeddings
+- **UI**: Gradio v6.3.0 (multimodal interface)
+- **Embeddings**: all-MiniLM-L6-v2 (384-dim)
+
+## Audit-Grade Logging
+
+### Research-Grade Session Logs
+
+Every workflow execution generates comprehensive JSON logs in `logs/sessions/` with:
+
+**Dual-Model Tracking**
+```json
+"models": {
+  "orchestrator": {
+    "name": "gemini-pro-latest",
+    "provider": "google_genai",
+    "role": "workflow_coordination"
+  },
+  "specialist": {
+    "name": "google/medgemma-27b-it",
+    "provider": "huggingface_transformers",
+    "role": "clinical_reasoning"
+  }
+}
+```
+
+**Input Causality**
+```json
+"input": {
+  "source_type": "step_5_ResearchAgent_output",
+  "reference": {
+    "step_id": 5,
+    "agent": "ResearchAgent",
+    "data_flow": "sequential"
+  }
+}
+```
+
+**Execution Details**
+```json
+"execution": {
+  "orchestrator_action": "specialist_invocation",
+  "operation_type": "specialist_guideline_synthesis",
+  "tools_called": ["medgemma_guideline_synthesis"]
+}
+```
+
+**Output Attribution**
+```json
+"output": {
+  "type": "guideline_synthesis",
+  "content": "...",
+  "produced_by": "specialist"
+}
+```
+
+**Step Metadata**
+```json
+"step_metadata": {
+  "step_role": "guideline_synthesis",
+  "step_phase": "specialist_reasoning",
+  "is_final_resolution": false
+}
+```
+
+**Trust Verification**
+```json
+"trust_metadata": {
+  "clinical_reasoning_by_specialist": true,
+  "specialist_model": "google/medgemma-27b-it",
+  "orchestrator_clinical_role": "none"
+}
+```
+
+### Step Phases
+
+Every step is classified into one of three phases:
+
+- **`specialist_reasoning`**: MedGemma-27B-IT performing clinical analysis
+- **`rag_retrieval`**: ChromaDB guideline retrieval
+- **`orchestration`**: Gemini coordinating workflow
+
+### Output Types
+
+Clear semantic types for every output:
+
+- `triage_analysis` - MedGemma case completeness assessment
+- `guideline_synthesis` - MedGemma guideline interpretation
+- `diagnostic_reasoning` - MedGemma SOAP note generation
+- `rag_results` - Retrieved clinical guidelines
+- `completeness_report` - Case data completeness check
+- `delegation_notice` - Agent transfer
+- `coordination_message` - Workflow coordination
+
+### Verifying MedGemma Usage
+
+To verify MedGemma performed clinical reasoning, check logs for steps with:
+```json
+{
+  "step_phase": "specialist_reasoning",
+  "specialist_model": "google/medgemma-27b-it",
+  "clinical_reasoning_by_specialist": true,
+  "output": {
+    "type": "triage_analysis" | "guideline_synthesis" | "diagnostic_reasoning",
+    "produced_by": "specialist"
+  }
+}
+```
+
+### Example Workflow Log
+
+A typical case generates 8-10 steps:
+
+1. **Step 1**: RootCoordinator delegates (`orchestration`)
+2. **Step 2**: TriageAgent checks completeness (`orchestration`)
+3. **Step 3**: TriageAgent invokes MedGemma (`specialist_reasoning`) ✓
+4. **Step 4**: TriageAgent transfers to Research (`orchestration`)
+5. **Step 5**: ResearchAgent retrieves guidelines (`rag_retrieval`)
+6. **Step 6**: ResearchAgent refines search (`rag_retrieval`)
+7. **Step 7**: ResearchAgent invokes MedGemma (`specialist_reasoning`) ✓
+8. **Step 8**: ResearchAgent transfers to Diagnostic (`orchestration`)
+9. **Step 9**: DiagnosticAgent invokes MedGemma (`specialist_reasoning`) ✓
+10. **Step 10**: DiagnosticAgent outputs final SOAP (`orchestration`)
+
+**Result**: 3 specialist reasoning steps (MedGemma) + 2 RAG steps + 5 orchestration steps
 
 ## Project Structure
 
 ```
 MedGemma/
-├── config/                  # Configuration management
-│   ├── config.py           # Settings loader
+├── config/                        # Configuration management
+│   ├── config.py                 # Settings loader with environment validation
 │   └── __init__.py
 ├── src/
-│   ├── agents/             # Multi-agent implementation
-│   │   ├── triage_agent.py
-│   │   ├── research_agent.py
-│   │   └── diagnostic_agent.py
-│   ├── rag/                # RAG pipeline
-│   │   ├── ingestion.py    # Document chunking & embedding
-│   │   ├── vector_store.py # ChromaDB interface
-│   │   └── retriever.py    # Semantic search
-│   ├── ui/                 # Gradio interface
-│   │   └── app.py
-│   └── utils/              # Shared utilities
-│       ├── schemas.py      # Pydantic data models
-│       └── logger.py       # Structured logging
+│   ├── agents/                   # Multi-agent implementation (Google ADK)
+│   │   ├── adk_agents.py        # Hybrid Gemini + MedGemma agents
+│   │   ├── conversation_manager.py  # Audit-grade session logging
+│   │   └── models/              # Model adapters
+│   │       ├── medgemma_adapter.py  # MedGemma-27B-IT interface
+│   │       └── gemini_adapter.py    # Gemini Pro Latest interface
+│   ├── rag/                      # RAG pipeline
+│   │   ├── ingestion.py         # Document chunking & embedding
+│   │   ├── vector_store.py      # ChromaDB interface
+│   │   └── retriever.py         # Semantic search with similarity scoring
+│   ├── ui/                       # Gradio interface
+│   │   └── app.py               # Multimodal UI with agent thought trace
+│   └── utils/                    # Shared utilities
+│       ├── schemas.py           # Pydantic data models (ClinicalCase, SOAPNote)
+│       └── logger.py            # Structured logging
 ├── data/
-│   ├── chroma/             # ChromaDB persistence (gitignored)
-│   ├── cases/              # Evaluation cases
-│   └── guidelines/         # AAD/StatPearls documents
-├── tests/                  # Unit & integration tests
-├── local_cache/            # Scraped data (gitignored)
-├── logs/                   # Application logs (gitignored)
-├── main.py                 # CLI entry point
-├── requirements.txt        # Python dependencies
-├── .env.template           # Environment variables template
-└── README.md
+│   ├── chroma/                   # ChromaDB persistence (2,184 chunks)
+│   └── cases/                    # Evaluation cases (NEJM-style vignettes)
+├── tests/                        # Test suite
+│   ├── test_adk_workflow.py     # Multi-agent workflow test
+│   └── test_gradio_app.py       # UI integration test
+├── bin/                          # Shell scripts
+│   └── run_test_adk.sh          # GPU session manager for HPC
+├── logs/                         # Application logs
+│   └── sessions/                # JSON/TXT/MD session logs
+├── main.py                       # CLI entry point
+├── requirements.txt              # Python dependencies (pinned versions)
+├── .env.template                 # Environment variables template
+└── README.md                     # This file
 ```
 
 ## Setup Instructions

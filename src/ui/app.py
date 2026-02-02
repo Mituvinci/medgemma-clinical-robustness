@@ -13,6 +13,7 @@ import gradio as gr
 import logging
 import json
 import asyncio
+import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from PIL import Image
@@ -562,8 +563,11 @@ class MedGemmaApp:
 def launch_app(
     share: bool = False,
     server_name: str = "127.0.0.1",
-    server_port: int = 7860
+    server_port: int = None
 ):
+    # Use environment variable if set, otherwise default to 7860
+    if server_port is None:
+        server_port = int(os.getenv("GRADIO_SERVER_PORT", 7860))
     """
     Launch the Gradio app.
 

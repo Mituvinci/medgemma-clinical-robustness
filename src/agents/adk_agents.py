@@ -878,7 +878,8 @@ class MedGemmaWorkflow:
                         if function_calls:
                             step_output += f"\n\n[Tool Calls: {len(function_calls)}]\n"
                             for fc in function_calls:
-                                step_output += f"  - {fc['name']}({fc['args'][:100]}...)\n"
+                                # Show FULL args (no truncation)
+                                step_output += f"  - {fc['name']}({fc['args']})\n"
 
                         agent_steps.append({
                             "agent": agent_name,
@@ -886,19 +887,127 @@ class MedGemmaWorkflow:
                             "function_calls": function_calls
                         })
 
-                        # Add to session workflow steps
+                        # Detect if MedGemma specialist was used
+                        specialist_model = None
+                        step_role = "orchestration"
+
+                        for fc in function_calls:
+                            fc_name = fc["name"].lower()
+                            if "medgemma" in fc_name:
+                                # MedGemma tool was called - clinical reasoning happened
+                                specialist_model = "google/medgemma-27b-it"
+
+                                # Determine step role based on function
+                                if "triage" in fc_name:
+                                    step_role = "triage_analysis"
+                                elif "guideline_synthesis" in fc_name:
+                                    step_role = "guideline_synthesis"
+                                elif "clinical_diagnosis" in fc_name:
+                                    step_role = "final_diagnosis"
+                                else:
+                                    step_role = "clinical_reasoning"
+                                break
+
+                        # Determine if this is the final step
+                        is_final = (
+                            agent_name == "DiagnosticAgent" and
+                            any("medgemma_clinical_diagnosis" in fc["name"] for fc in function_calls)
+                        )
+
+                        # Build input reference (track causality) - SPECIFIC SOURCE
+                        input_reference = None
+                        if len(agent_steps) > 1:
+                            # This step depends on previous step
+                            prev_step_id = len(agent_steps) - 1
+                            prev_agent = agent_steps[-2]["agent"] if len(agent_steps) > 1 else "User"
+                            # SPECIFIC source type: "step_5_ResearchAgent_output"
+                            specific_source = f"step_{prev_step_id}_{prev_agent}_output"
+                            input_reference = {
+                                "source_type": specific_source,
+                                "reference": {
+                                    "step_id": prev_step_id,
+                                    "agent": prev_agent,
+                                    "data_flow": "sequential"
+                                }
+                            }
+                        else:
+                            # First step - from user
+                            input_reference = {
+                                "source_type": "user_input",
+                                "reference": None
+                            }
+
+                        # Determine orchestrator action, operation type, and output type
+                        orchestrator_action = "delegation"
+                        operation_type = "coordination"  # Default
+                        output_type = "coordination_message"  # Default
+
+                        if function_calls:
+                            for fc in function_calls:
+                                fc_name = fc["name"]
+                                if "transfer_to_agent" in fc_name:
+                                    orchestrator_action = "agent_transfer"
+                                    operation_type = "workflow_delegation"
+                                    output_type = "delegation_notice"
+                                    break
+                                elif "medgemma_triage" in fc_name:
+                                    orchestrator_action = "specialist_invocation"
+                                    operation_type = "specialist_triage_analysis"
+                                    output_type = "triage_analysis"
+                                    break
+                                elif "medgemma_guideline_synthesis" in fc_name:
+                                    orchestrator_action = "specialist_invocation"
+                                    operation_type = "specialist_guideline_synthesis"
+                                    output_type = "guideline_synthesis"
+                                    break
+                                elif "medgemma_clinical_diagnosis" in fc_name:
+                                    orchestrator_action = "specialist_invocation"
+                                    operation_type = "specialist_clinical_diagnosis"
+                                    output_type = "diagnostic_reasoning"
+                                    break
+                                elif "medgemma" in fc_name:
+                                    orchestrator_action = "specialist_invocation"
+                                    operation_type = "specialist_reasoning"
+                                    output_type = "clinical_reasoning"
+                                    break
+                                elif "retrieve_clinical_guidelines" in fc_name:
+                                    orchestrator_action = "retrieval"
+                                    operation_type = "rag_retrieval"
+                                    output_type = "rag_results"
+                                    break
+                                elif "analyze_case_completeness" in fc_name:
+                                    orchestrator_action = "analysis"
+                                    operation_type = "case_completeness_check"
+                                    output_type = "completeness_report"
+                                    break
+
+                        # Build tools_called list
+                        tools_called = [fc["name"] for fc in function_calls]
+
+                        # Estimate token usage from text length (rough approximation)
+                        token_count = len(event_text.split()) * 1.3 if event_text else 0
+
+                        # Add to session workflow steps with full metadata
                         session.add_step(
                             agent_name=agent_name,
                             step_data={
                                 "input": user_message if len(agent_steps) == 1 else "Previous agent output",
                                 "output": step_output,
-                                "function_calls": function_calls,
-                                "reasoning": f"{agent_name} processing",
+                                "output_type": output_type,  # NEW: Type of output
+                                "orchestrator_action": orchestrator_action,
+                                "operation_type": operation_type,
+                                "tools_called": tools_called,
+                                "reasoning": f"{agent_name} {orchestrator_action}",
                                 "metrics": {
-                                    "tokens_used": len(event_text.split()) if event_text else 0,
-                                    "latency_ms": 0
+                                    "tokens_used": int(token_count),
+                                    "latency_ms": 0  # ADK doesn't expose latency per-step
                                 }
-                            }
+                            },
+                            orchestrator_model=self.model_name,
+                            specialist_model=specialist_model,
+                            input_reference=input_reference,
+                            step_role=step_role,
+                            is_final=is_final
                         )
 
         # Retrieve full ADK session history for complete transparency
@@ -933,14 +1042,34 @@ class MedGemmaWorkflow:
 
                         # Add to session if not already logged
                         if msg_role != "user":  # Don't duplicate user input
+                            # Detect if MedGemma was mentioned in output
+                            specialist_model = None
+                            if "medgemma" in msg_text.lower() or "specialist" in msg_text.lower():
+                                specialist_model = "google/medgemma-27b-it"
+
+                            # Input reference for history replay
+                            input_ref = {
+                                "source_type": "adk_history",
+                                "reference": {
+                                    "message_index": idx,
+                                    "role": msg_role
+                                }
+                            }
+
                             session.add_step(
                                 agent_name=agent_name,
                                 step_data={
                                     "role": msg_role,
                                     "message_index": idx,
                                     "output": msg_text.strip()[:2000],  # Limit length
-                                    "full_length": len(msg_text)
-                                }
+                                    "full_length": len(msg_text),
+                                    "orchestrator_action": "history_replay",
+                                    "tools_called": []
+                                },
+                                orchestrator_model=self.model_name,
+                                specialist_model=specialist_model,
+                                input_reference=input_ref,
+                                step_role="adk_history_replay"
                             )
 
         except Exception as e:

@@ -150,6 +150,70 @@ class ConversationSession:
             return "anthropic"
         return "unknown"
 
+    def _build_output(
+        self,
+        step_data: Dict[str, Any],
+        specialist_model: Optional[str],
+        is_final: bool,
+        input_reference: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Build output dict, handling both old (string) and new (dict) formats.
+
+        Args:
+            step_data: Step data
+            specialist_model: Specialist model name
+            is_final: Whether this is final resolution
+            input_reference: Input reference
+
+        Returns:
+            Output dictionary
+        """
+        output = {"type": step_data.get("output_type", "unknown")}
+
+        # Handle backward compatibility: output can be string or dict
+        output_data = step_data.get("output", {})
+        if isinstance(output_data, str):
+            # Old format: output is a string
+            output["content"] = output_data
+        elif isinstance(output_data, dict):
+            # New format: output is a dict
+            output.update(output_data)
+
+        # Add attribution
+        if is_final:
+            output["produced_by"] = {
+                "assembled_by": "orchestrator",
+                "clinical_content_by": specialist_model,
+                "reasoning_source_step": input_reference.get("reference", {}).get("step_id") if input_reference and input_reference.get("reference") else None
+            }
+        else:
+            output["produced_by"] = "specialist" if specialist_model else "orchestrator"
+
+        return output
+
+    def _determine_step_phase(
+        self,
+        specialist_model: Optional[str],
+        operation_type: Optional[str]
+    ) -> str:
+        """
+        Determine the phase of this step.
+
+        Args:
+            specialist_model: Specialist model name (if any)
+            operation_type: Operation type
+
+        Returns:
+            Step phase: "specialist_reasoning", "rag_retrieval", or "orchestration"
+        """
+        if specialist_model:
+            return "specialist_reasoning"
+        elif operation_type and "rag" in operation_type.lower():
+            return "rag_retrieval"
+        else:
+            return "orchestration"
+
     def add_step(
         self,
         agent_name: str,
@@ -209,23 +273,12 @@ class ConversationSession:
             # Execution details
             "execution": {
                 "orchestrator_action": step_data.get("orchestrator_action", "unknown"),
+                "operation_type": step_data.get("operation_type", "unknown"),
                 "tools_called": step_data.get("tools_called", [])
             },
 
-            # Output
-            "output": {
-                "type": step_data.get("output_type", "unknown"),
-                **step_data.get("output", {}),
-
-                # Clear attribution
-                "produced_by": {
-                    "assembled_by": "orchestrator",
-                    "clinical_content_by": specialist_model,
-                    "reasoning_source_step": input_reference.get("reference", {}).get("step_id") if input_reference and input_reference.get("reference") else None
-                } if is_final else (
-                    "specialist" if specialist_model else "orchestrator"
-                )
-            },
+            # Output (handle both dict and string for backward compatibility)
+            "output": self._build_output(step_data, specialist_model, is_final, input_reference),
 
             # Constrained rationale (not free-form reasoning)
             "decision_rationale": {
@@ -237,6 +290,7 @@ class ConversationSession:
             # Step metadata
             "step_metadata": {
                 "step_role": step_role,
+                "step_phase": self._determine_step_phase(specialist_model, step_data.get("operation_type")),
                 "is_final_resolution": is_final,
                 "next_step_suggestion": step_data.get("next_step"),
                 **step_data.get("metadata", {})

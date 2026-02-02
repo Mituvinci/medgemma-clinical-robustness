@@ -11,7 +11,7 @@
 
 set -e  # Exit on error
 
-PROJECT_DIR="/users/ha00014/Halimas_projects/MedGemma"
+PROJECT_DIR="/users/ha00014/Halimas_projects/MedGemma/"
 cd "$PROJECT_DIR"
 
 echo "========================================================================"
@@ -99,8 +99,8 @@ print(f'Collection: {stats[\"name\"]}')
     echo "Using: MedGemma-27B-IT (local GPU) + Gemini Pro (orchestration)"
     echo ""
 
-    # Run the test
-    python test_adk_workflow.py
+    # Run the test (from project root)
+    python tests/test_adk_workflow.py
 
     TEST_EXIT_CODE=$?
 

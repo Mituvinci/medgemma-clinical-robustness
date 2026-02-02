@@ -45,18 +45,40 @@ class MedGemmaAdapter(BaseLLM):
         logger.info(f"Model ID: {model_id}")
         logger.info(f"Using token: {api_key[:10]}... (length: {len(api_key)})")
 
-        # Check GPU availability
+        # Check GPU availability and multi-GPU setup
         if torch.cuda.is_available():
             self.device = "cuda"
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-            logger.info(f"✅ GPU detected: {gpu_name}")
-            logger.info(f"   GPU memory: {gpu_memory:.2f} GB")
+            num_gpus = torch.cuda.device_count()
 
-            # Auto-enable 4-bit if GPU has < 40GB
-            if gpu_memory < 40 and not use_4bit:
-                logger.warning(f"⚠️  GPU has only {gpu_memory:.1f}GB. Enabling 4-bit quantization automatically.")
-                use_4bit = True
+            if num_gpus > 1:
+                logger.info(f"✅ Multi-GPU detected: {num_gpus} GPUs available")
+                logger.info(f"   🚀 Will use automatic model parallelism across all GPUs")
+
+                # Log each GPU
+                total_memory = 0
+                for i in range(num_gpus):
+                    gpu_name = torch.cuda.get_device_name(i)
+                    gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
+                    total_memory += gpu_memory
+                    logger.info(f"   GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
+
+                logger.info(f"   Total GPU memory: {total_memory:.1f} GB")
+
+                # With multiple GPUs, we have more memory - disable 4-bit if sufficient
+                if total_memory >= 80 and use_4bit:
+                    logger.info(f"   ✨ Sufficient memory detected ({total_memory:.1f}GB). Disabling 4-bit for better quality.")
+                    use_4bit = False
+
+            else:
+                gpu_name = torch.cuda.get_device_name(0)
+                gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+                logger.info(f"✅ Single GPU detected: {gpu_name}")
+                logger.info(f"   GPU memory: {gpu_memory:.2f} GB")
+
+                # Auto-enable 4-bit if GPU has < 40GB
+                if gpu_memory < 40 and not use_4bit:
+                    logger.warning(f"⚠️  GPU has only {gpu_memory:.1f}GB. Enabling 4-bit quantization automatically.")
+                    use_4bit = True
         else:
             self.device = "cpu"
             logger.warning("⚠️  No GPU detected! Using CPU (will be VERY slow)")
@@ -92,19 +114,28 @@ class MedGemmaAdapter(BaseLLM):
             )
             logger.info("   ✅ 4-bit config: NF4 quantization with double quantization")
 
-        # Load model on GPU
+        # Load model on GPU with automatic multi-GPU distribution
         logger.info("📥 Loading model weights...")
         if use_4bit:
             logger.info("   (4-bit: ~14GB model + ~6GB overhead = ~20GB total)")
         else:
             logger.info("   (bfloat16: ~54GB model + ~20GB overhead = ~74GB total)")
 
+        # Force device_map="auto" for multi-GPU, otherwise use specified device
+        if device == "auto" or (torch.cuda.is_available() and torch.cuda.device_count() > 1):
+            actual_device_map = "auto"
+            if torch.cuda.device_count() > 1:
+                logger.info(f"   🔧 Using device_map='auto' for automatic distribution across {torch.cuda.device_count()} GPUs")
+        else:
+            actual_device_map = device
+            logger.info(f"   🔧 Using device_map='{actual_device_map}'")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             token=api_key,
             quantization_config=quantization_config,
             torch_dtype=torch.bfloat16 if not use_4bit else None,
-            device_map=device,
+            device_map=actual_device_map,  # Automatic multi-GPU distribution
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
@@ -115,6 +146,22 @@ class MedGemmaAdapter(BaseLLM):
         logger.info(f"   Model parameters: {num_params / 1e9:.2f}B")
         if use_4bit:
             logger.info(f"   Quantization: 4-bit (memory optimized)")
+
+        # Show GPU distribution if multi-GPU
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            logger.info(f"   📊 Model distributed across {torch.cuda.device_count()} GPUs:")
+            if hasattr(self.model, 'hf_device_map'):
+                # Count layers per GPU
+                device_counts = {}
+                for name, device in self.model.hf_device_map.items():
+                    device_str = str(device)
+                    device_counts[device_str] = device_counts.get(device_str, 0) + 1
+
+                for device_name, count in sorted(device_counts.items()):
+                    logger.info(f"      {device_name}: {count} layers")
+            else:
+                logger.info(f"      Device map not available (using default distribution)")
+
         logger.info(f"   Ready for inference!")
 
     def generate(

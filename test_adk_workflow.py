@@ -7,9 +7,49 @@ Verifies the proper Google ADK implementation.
 import sys
 from pathlib import Path
 import asyncio
+import json
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
+
+# ============================================================================
+# FIX: Patch ADK telemetry to handle bytes (if needed in ADK 1.23.0)
+# ============================================================================
+try:
+    import google.adk.telemetry as telemetry
+
+    # Try to patch the trace_call_llm function to handle bytes
+    original_trace_call_llm = telemetry.trace_call_llm
+
+    def safe_trace_call_llm(*args, **kwargs):
+        """Wrapper that converts bytes to strings before logging."""
+        try:
+            # Try to sanitize any bytes in the arguments
+            safe_args = []
+            for arg in args:
+                if isinstance(arg, bytes):
+                    safe_args.append(arg.decode('utf-8', errors='replace'))
+                else:
+                    safe_args.append(arg)
+
+            safe_kwargs = {}
+            for key, value in kwargs.items():
+                if isinstance(value, bytes):
+                    safe_kwargs[key] = value.decode('utf-8', errors='replace')
+                else:
+                    safe_kwargs[key] = value
+
+            return original_trace_call_llm(*safe_args, **safe_kwargs)
+        except Exception:
+            # If patching fails, just skip telemetry for this call
+            pass
+
+    telemetry.trace_call_llm = safe_trace_call_llm
+    print("✓ ADK 1.23.0 telemetry patched for bytes handling")
+except Exception as e:
+    print(f"⚠ Could not patch ADK telemetry: {e}")
+    print("   (Should be fine with ADK 1.23.0+)")
+# ============================================================================
 
 from src.agents.adk_agents import create_workflow
 from src.utils.schemas import ClinicalCase, ContextState
@@ -87,16 +127,31 @@ async def test_adk_workflow_async():
         print("2. The response above is the final SOAP note from DiagnosticAgent")
         print("3. Build Gradio UI (Step 4) to provide interactive interface")
 
+        return True  # Success
+
     except Exception as e:
         print(f"\n[ERROR] Workflow failed: {e}")
         import traceback
         traceback.print_exc()
-        return
+        print("\n" + "=" * 70)
+        print("[FAILED] GOOGLE ADK WORKFLOW TEST FAILED")
+        print("=" * 70)
+        sys.exit(1)  # Exit with error code
 
 
 def test_adk_workflow():
     """Synchronous wrapper for async test."""
-    asyncio.run(test_adk_workflow_async())
+    try:
+        result = asyncio.run(test_adk_workflow_async())
+        if result:
+            sys.exit(0)  # Success
+        else:
+            sys.exit(1)  # Failure
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] Test runner failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

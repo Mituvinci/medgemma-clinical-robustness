@@ -18,10 +18,10 @@ This "Partner-Style" Clinical Assistant uses a hierarchical multi-agent workflow
 - **Diagnostic Agent**: Synthesizes information into structured SOAP notes with differential diagnoses
 
 ### Technology Stack
-- **Foundation Models**: MedGemma-27B (Hugging Face) and Gemini Pro (Google)
-- **Agent Framework**: Google Agent Development Kit (ADK)
-- **Vector Database**: ChromaDB with sentence-transformers embeddings
-- **UI**: Gradio (multimodal interface for images, text, and chat)
+- **Foundation Models**: MedGemma-27B-IT (Hugging Face) and Gemini Pro Latest (Google)
+- **Agent Framework**: Google Agent Development Kit (ADK) v1.23.0 - Latest stable release with improved telemetry and async support
+- **Vector Database**: ChromaDB v1.x with sentence-transformers embeddings
+- **UI**: Gradio v4.12.0 (multimodal interface for images, text, and chat)
 
 ## Project Structure
 
@@ -59,12 +59,23 @@ MedGemma/
 
 ## Setup Instructions
 
+### Prerequisites
+
+- Python 3.10+
+- CUDA-capable GPU (recommended for local MedGemma inference)
+- 64GB+ RAM for optimal performance
+
 ### 1. Clone and Install
 
 ```bash
 cd "D:\Halima's Data\more\LLM_Udemy\MedGemma"
 pip install -r requirements.txt
 ```
+
+**Note**: This project uses the latest stable versions:
+- Google ADK 1.23.0 (improved telemetry and async support)
+- ChromaDB 1.x (better performance and vector search capabilities)
+- All dependencies are pinned for reproducibility
 
 ### 2. Configure API Keys
 
@@ -75,9 +86,9 @@ copy .env.template .env
 ```
 
 Edit `.env` and add:
-- `HUGGINGFACE_API_KEY`: Your Hugging Face API key (for MedGemma-27B)
-- `GEMINI_API_KEY`: Your Google Gemini API key
-- `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID (for ADK)
+- `HUGGINGFACE_API_KEY`: Your Hugging Face API key (for MedGemma-27B-IT clinical reasoning)
+- `GEMINI_API_KEY`: Your Google Gemini API key (for Gemini Pro Latest orchestration)
+- `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID (for ADK v1.23.0)
 
 ### 3. Ingest Guidelines
 

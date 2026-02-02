@@ -1,37 +1,43 @@
 # Core Dependencies
-python-dotenv==1.0.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
+python-dotenv==1.1.0
+pydantic==2.11.10
+pydantic-settings==2.12.0
 
 # AI/ML Models
-google-cloud-aiplatform==1.38.0
-google-genai==0.2.0
-google-adk==0.1.0
-transformers==4.36.2
-sentence-transformers==2.2.2
-torch==2.1.2
-huggingface-hub==0.20.2
+google-cloud-aiplatform==1.135.0
+google-genai==1.61.0
+google-adk==1.23.0  # Latest stable version (improved telemetry, better async support)
+transformers==5.0.0  # Latest major release (Jan 2025)
+sentence-transformers==5.2.2
+torch==2.10.0  # Generic version for portability
+torchvision==0.25.0  # Generic version for portability
+torchaudio==2.10.0  # Generic version for portability
+huggingface-hub==1.3.5
+
+# NOTE: For NVIDIA GPUs with CUDA 12.8, install CUDA-specific versions for better performance:
+# pip install --force-reinstall torch==2.10.0+cu128 torchvision==0.25.0+cu128 torchaudio==2.10.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+# The +cu128 versions are optimized for CUDA 12.8 but less portable across different systems.
 
 # Vector Database
-chromadb>=1.0.0  # Using latest ChromaDB 1.x (better performance and features)
+chromadb==1.4.1  # Using ChromaDB 1.x (better performance and features)
 
 # UI Framework
-gradio==4.12.0
+gradio==6.3.0
 
 # Data Processing
-pandas==2.1.4
-numpy==1.26.3
-pillow==10.1.0
-pypdf==3.17.4
-beautifulsoup4==4.12.2
-requests==2.31.0
-lxml==5.1.0
+pandas==2.2.3
+numpy==1.26.4
+pillow==11.0.0
+pypdf==6.6.2
+beautifulsoup4==4.14.2
+requests==2.32.5
+lxml==5.4.0
 
 # Utilities
-tenacity==8.2.3
-tqdm==4.66.1
+tenacity==9.1.2
+tqdm==4.67.1
 python-json-logger==2.0.7
-pyyaml==6.0.1
+pyyaml==6.0.2
 
 # Testing
 pytest==7.4.3
@@ -39,7 +45,10 @@ pytest-asyncio==0.21.1
 pytest-mock==3.12.0
 
 # Development
-black==23.12.1
-flake8==7.0.0
-mypy==1.8.0
-bitsandbytes>=0.41.0  # 4-bit quantization for local GPU
+black==25.1.0
+flake8==7.1.1
+mypy==1.14.1
+bitsandbytes==0.49.1  # 4-bit quantization for local GPU
+
+# Audio Processing (compatible with PyTorch 2.10.0)
+torchaudio==2.10.0

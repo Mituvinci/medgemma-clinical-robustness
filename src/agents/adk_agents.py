@@ -44,10 +44,26 @@ MedGemma-27B-IT is the specialist physician.
 """
 
 import logging
+import os
 from typing import Dict, Any, List, Optional
+
+# Disable ADK telemetry to avoid JSON serialization issues with bytes
+os.environ['ADK_TELEMETRY_DISABLED'] = '1'
+os.environ['GOOGLE_ADK_TELEMETRY'] = '0'
+
 from google.adk import Agent, Runner
 from google.adk.tools import FunctionTool
 from google.genai import types
+
+# Monkey-patch ADK telemetry to avoid JSON serialization errors with bytes
+try:
+    from google.adk import telemetry
+    # Replace trace functions with no-ops
+    telemetry.trace_call_llm = lambda *args, **kwargs: None
+    telemetry.trace_llm_response = lambda *args, **kwargs: None
+    print("✓ ADK telemetry disabled (monkey-patched)")
+except Exception:
+    pass  # Silently continue if telemetry module not found
 
 from src.rag.retriever import Retriever
 from src.utils.schemas import (
@@ -749,7 +765,7 @@ class MedGemmaWorkflow:
         user_id = "user_001"
         adk_session_id = str(uuid.uuid4())
 
-        # Create session using session service (async)
+        # Create session using session service (async in ADK 1.23.0+)
         adk_session = await self.runner.session_service.create_session(
             app_name="MedGemma Clinical Assistant",
             user_id=user_id,
@@ -768,7 +784,9 @@ class MedGemmaWorkflow:
             model_name=self.model_name,
             agent_model=self.agent_model  # For meaningful filename (medgemma or gemini)
         )
-        session.set_initial_input(case.dict())
+        # Exclude image_data to avoid JSON serialization issues with bytes
+        case_dict = case.dict(exclude={'image_data'})
+        session.set_initial_input(case_dict)
 
         # Prepare message as Content object
         from google.genai import types as genai_types

@@ -159,6 +159,13 @@ class MedGemmaAdapter(BaseLLM):
 
                 for device_name, count in sorted(device_counts.items()):
                     logger.info(f"      {device_name}: {count} layers")
+
+                # Show GPU memory usage AFTER loading
+                logger.info(f"   💾 GPU Memory Usage After Loading:")
+                for i in range(torch.cuda.device_count()):
+                    allocated = torch.cuda.memory_allocated(i) / 1e9
+                    reserved = torch.cuda.memory_reserved(i) / 1e9
+                    logger.info(f"      GPU {i}: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
             else:
                 logger.info(f"      Device map not available (using default distribution)")
 
@@ -184,6 +191,13 @@ class MedGemmaAdapter(BaseLLM):
             Generated text
         """
         try:
+            # Log GPU usage before generation (multi-GPU check)
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+                logger.info("🔍 GPU Usage BEFORE generation:")
+                for i in range(torch.cuda.device_count()):
+                    allocated = torch.cuda.memory_allocated(i) / 1e9
+                    logger.info(f"   GPU {i}: {allocated:.2f}GB")
+
             # Tokenize input with padding
             inputs = self.tokenizer(
                 prompt,
@@ -194,6 +208,7 @@ class MedGemmaAdapter(BaseLLM):
             ).to(self.device)
 
             # Generate with GREEDY decoding (more stable with quantized models)
+            logger.info(f"🧠 Generating with MedGemma (max_tokens={max_tokens})...")
             with torch.no_grad():
                 outputs = self.model.generate(
                     input_ids=inputs["input_ids"],
@@ -207,6 +222,13 @@ class MedGemmaAdapter(BaseLLM):
                     use_cache=True,
                     **kwargs
                 )
+
+            # Log GPU usage after generation (multi-GPU check)
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+                logger.info("🔍 GPU Usage AFTER generation:")
+                for i in range(torch.cuda.device_count()):
+                    allocated = torch.cuda.memory_allocated(i) / 1e9
+                    logger.info(f"   GPU {i}: {allocated:.2f}GB")
 
             # Decode output
             generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)

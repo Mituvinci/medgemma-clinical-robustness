@@ -748,7 +748,8 @@ class MedGemmaWorkflow:
     async def run_async(
         self,
         case: ClinicalCase,
-        user_message: Optional[str] = None
+        user_message: Optional[str] = None,
+        existing_session=None
     ) -> Dict[str, Any]:
         """
         Run workflow asynchronously.
@@ -756,6 +757,8 @@ class MedGemmaWorkflow:
         Args:
             case: Clinical case to analyze
             user_message: Optional user message (uses case data if None)
+            existing_session: If provided, continue logging into this session
+                              instead of creating a new one. Used for follow-ups.
 
         Returns:
             Dict with agent responses and final diagnosis
@@ -778,15 +781,18 @@ class MedGemmaWorkflow:
 
         logger.info(f"Running workflow for case: {case.case_id}")
 
-        # Create our session for logging BEFORE workflow (so we can log steps)
-        session = self.conversation_manager.create_session(
-            case_id=case.case_id,
-            model_name=self.model_name,
-            agent_model=self.agent_model  # For meaningful filename (medgemma or gemini)
-        )
-        # Exclude image_data to avoid JSON serialization issues with bytes
-        case_dict = case.dict(exclude={'image_data'})
-        session.set_initial_input(case_dict)
+        # Use existing session (follow-up) or create new one
+        if existing_session:
+            session = existing_session
+            logger.info(f"Continuing existing session: {session.session_id}")
+        else:
+            session = self.conversation_manager.create_session(
+                case_id=case.case_id,
+                model_name=self.model_name,
+                agent_model=self.agent_model
+            )
+            case_dict = case.dict(exclude={'image_data'})
+            session.set_initial_input(case_dict)
 
         # Prepare message as Content object
         from google.genai import types as genai_types
@@ -1085,9 +1091,17 @@ class MedGemmaWorkflow:
             "agent_steps_count": len(agent_steps)
         }
 
-        # Complete session
-        session.set_final_output(result)
-        self.conversation_manager.complete_session(session.session_id, save=True)
+        # Complete and save session
+        # If this is a continuation (existing_session), do NOT save yet
+        # The caller will save after adding the follow-up step
+        if existing_session:
+            logger.info(f"Continuation run complete. Session {session.session_id} kept open for caller to save.")
+        else:
+            session.set_final_output(result)
+            self.conversation_manager.complete_session(session.session_id, save=True)
+
+        # Attach session to result so caller can access it
+        result["_session"] = session
 
         logger.info(f"Workflow complete for case: {case.case_id} ({len(agent_steps)} agent interactions logged)")
 

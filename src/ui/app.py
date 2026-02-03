@@ -42,6 +42,7 @@ class MedGemmaApp:
             use_medgemma=True  # DEFAULT: medgemma-27b-it for clinical reasoning
         )
         self.current_case = None
+        self.current_session = None  # Stored on agentic pause for follow-up continuation
         self.conversation_history = []
 
         logger.info("MedGemmaApp initialized (Hybrid: ADK+Gemini Pro Latest orchestration, medgemma-27b-it reasoning)")
@@ -66,12 +67,45 @@ class MedGemmaApp:
                 logger.info(f"Parsed JSON case file: {case_data.get('case_id', 'unknown')}")
                 return case_data
             except json.JSONDecodeError:
-                # Treat as plain text history
-                logger.info("Parsed text case file as history")
-                return {
-                    "history": content,
-                    "context_state": "ORIGINAL"
-                }
+                # Plain text file - extract context_state from filename
+                # Filenames follow pattern: MM_DD_YY_<context_state>.txt
+                # e.g. 01_23_25_image_only.txt, 01_23_25_original.txt
+                filename = Path(file_path).stem.lower()  # e.g. "01_23_25_image_only"
+
+                context_state = "original"  # default
+                if filename.endswith("_image_only"):
+                    context_state = "image_only"
+                elif filename.endswith("_history"):
+                    context_state = "history_only"
+                elif filename.endswith("_exam_restricted"):
+                    context_state = "exam_restricted"
+                elif filename.endswith("_exam"):
+                    context_state = "original"
+                elif filename.endswith("_original"):
+                    context_state = "original"
+                elif filename.endswith("_redesign"):
+                    context_state = "original"
+
+                # Route content to correct field based on context_state
+                case_data = {"context_state": context_state}
+
+                if context_state == "image_only":
+                    # image_only: no history or exam text to extract
+                    case_data["history"] = ""
+                    case_data["physical_exam"] = ""
+                elif context_state == "history_only":
+                    case_data["history"] = content
+                elif context_state in ("exam_restricted",):
+                    case_data["physical_exam"] = content
+                elif filename.endswith("_exam"):
+                    # exam file: content is physical exam findings
+                    case_data["physical_exam"] = content
+                else:
+                    # original/redesign: full case goes into history
+                    case_data["history"] = content
+
+                logger.info(f"Parsed text file: context_state='{context_state}' from filename '{filename}'")
+                return case_data
         except Exception as e:
             logger.error(f"Failed to parse case file: {e}")
             return None
@@ -142,16 +176,26 @@ class MedGemmaApp:
             missing_data_detected = self._detect_missing_data(response_text)
 
             if missing_data_detected:
+                # Store the session so follow-up can continue into it
+                self.current_session = result.get("_session")
+                logger.info(f"Agentic pause - session stored: {self.current_session.session_id if self.current_session else 'None'}")
+
                 # Make the agentic moment UNAVOIDABLE and VISIBLE
                 clarification_msg = self._format_clarification_request(response_text)
                 soap_response = clarification_msg
                 thinking_process = "### Agentic Decision\n\n" + \
                     "The Triage Agent has identified **missing critical data** required for safe diagnosis.\n\n" + \
                     "**Action:** Agent is requesting clarification instead of guessing or proceeding with incomplete information."
+                # Show the follow-up input box
+                show_followup = gr.update(visible=True)
             else:
+                # No pause -- no session to carry forward
+                self.current_session = None
                 # Parse SOAP note sections
                 soap_response = self._format_soap_response(response_text)
                 thinking_process = self._extract_thinking_process(response_text)
+                # Hide follow-up box (diagnosis is complete)
+                show_followup = gr.update(visible=False)
 
             citations = self._extract_citations(response_text)
 
@@ -162,14 +206,148 @@ class MedGemmaApp:
                 "session_id": result.get("session_id")
             })
 
-            return soap_response, thinking_process, citations
+            return soap_response, thinking_process, citations, show_followup
 
         except Exception as e:
             logger.error(f"Error processing case: {e}", exc_info=True)
             error_msg = f"Error: {str(e)}\n\nPlease check your inputs and try again."
-            return error_msg, "", ""
+            return error_msg, "", "", gr.update(visible=False)
 
-    def process_case(self, *args) -> Tuple[str, str, str]:
+    async def process_followup_async(self, followup_text: str) -> Tuple[str, str, str, Any]:
+        """
+        Process user's follow-up answers to the agent's clarification questions.
+
+        Continues the SAME session that was paused during the agentic pause:
+        1. Logs the user's text as a "user_followup" step (linked to the pause step)
+        2. Merges follow-up into the case
+        3. Reruns the workflow with existing_session so all steps land in one log
+        4. Finalizes and saves the session after the second run
+
+        Args:
+            followup_text: User's answers to the agent's questions
+
+        Returns:
+            Tuple of (response, thinking_process, citations, followup_visibility)
+        """
+        if not self.current_case:
+            return "No active case to follow up on. Please submit a new case first.", "", "", gr.update(visible=False)
+
+        try:
+            import re
+            from datetime import datetime
+
+            # Parse follow-up for age pattern (e.g. "10 months old", "65 years old")
+            age_match = re.search(r'(\d+)\s*(?:months?|years?)\s*old', followup_text.lower())
+            if age_match and not self.current_case.patient_age:
+                self.current_case.patient_age = int(age_match.group(1))
+
+            # Parse gender
+            if not self.current_case.patient_gender:
+                if 'female' in followup_text.lower() or 'girl' in followup_text.lower() or 'woman' in followup_text.lower():
+                    self.current_case.patient_gender = "female"
+                elif 'male' in followup_text.lower() or 'boy' in followup_text.lower() or 'man' in followup_text.lower():
+                    self.current_case.patient_gender = "male"
+
+            # Append follow-up to history as additional context
+            existing_history = self.current_case.history or ""
+            if existing_history:
+                updated_history = existing_history + "\n\nAdditional context provided by clinician:\n" + followup_text
+            else:
+                updated_history = followup_text
+
+            self.current_case.history = updated_history
+            self.current_case.context_state = "original"  # Now we have more data
+
+            logger.info(f"Follow-up merged into case: {self.current_case.case_id}")
+            logger.info(f"   Age: {self.current_case.patient_age}, Gender: {self.current_case.patient_gender}")
+
+            # --- SESSION CONTINUITY: log the user's follow-up as a step ---
+            if self.current_session:
+                # The pause step is the last step in the session so far
+                pause_step_id = self.current_session.current_step
+                self.current_session.add_step(
+                    agent_name="User",
+                    step_data={
+                        "input": followup_text,
+                        "output": followup_text,
+                        "output_type": "user_followup",
+                        "orchestrator_action": "user_response",
+                        "operation_type": "user_followup",
+                        "tools_called": [],
+                        "input_summary": f"Clinician follow-up answering agentic pause (linked to step {pause_step_id})",
+                        "metadata": {
+                            "linked_to_step": pause_step_id,
+                            "parsed_age": self.current_case.patient_age,
+                            "parsed_gender": self.current_case.patient_gender
+                        }
+                    },
+                    orchestrator_model="user",
+                    specialist_model=None,
+                    input_reference={
+                        "source_type": f"step_{pause_step_id}_TriageAgent_agentic_pause",
+                        "reference": {
+                            "step_id": pause_step_id,
+                            "agent": "TriageAgent",
+                            "data_flow": "user_followup"
+                        }
+                    },
+                    step_role="user_followup",
+                    is_final=False
+                )
+                logger.info(f"User follow-up logged as step {self.current_session.current_step} in session {self.current_session.session_id}")
+
+            # --- RERUN WORKFLOW with the existing session (continuation) ---
+            result = await self.workflow.run_async(
+                self.current_case,
+                existing_session=self.current_session  # None is safe -- creates new session
+            )
+            response_text = result.get("response", "")
+
+            # Check again if still missing data
+            missing_data_detected = self._detect_missing_data(response_text)
+
+            session = result.get("_session")
+
+            if missing_data_detected:
+                # Still missing data -- keep the session open for another follow-up round
+                self.current_session = session
+                soap_response = self._format_clarification_request(response_text)
+                thinking_process = "### Agentic Decision (Follow-up Round)\n\n" + \
+                    "Additional information received. Triage Agent still identifies missing data.\n\n" + \
+                    "**Action:** Requesting further clarification."
+                show_followup = gr.update(visible=True)
+            else:
+                # Diagnosis complete -- finalize and save the single session that
+                # now contains: initial run steps + user_followup step + continuation steps
+                if session:
+                    session.set_final_output(result)
+                    self.workflow.conversation_manager.complete_session(session.session_id, save=True)
+                    logger.info(f"Session {session.session_id} finalized and saved (full interaction captured)")
+                self.current_session = None
+                soap_response = self._format_soap_response(response_text)
+                thinking_process = self._extract_thinking_process(response_text)
+                show_followup = gr.update(visible=False)
+
+            citations = self._extract_citations(response_text)
+
+            self.conversation_history.append({
+                "case": self.current_case.dict(exclude={'image_data'}),
+                "response": response_text,
+                "session_id": result.get("session_id"),
+                "followup": followup_text
+            })
+
+            return soap_response, thinking_process, citations, show_followup
+
+        except Exception as e:
+            logger.error(f"Error processing follow-up: {e}", exc_info=True)
+            return f"Error: {str(e)}\n\nPlease try again.", "", "", gr.update(visible=True)
+
+    def process_followup(self, followup_text: str) -> Tuple[str, str, str, Any]:
+        """Synchronous wrapper for process_followup_async."""
+        return asyncio.run(self.process_followup_async(followup_text))
+
+    def process_case(self, *args) -> Tuple[str, str, str, Any]:
         """Synchronous wrapper for process_case_async."""
         return asyncio.run(self.process_case_async(*args))
 
@@ -476,6 +654,20 @@ class MedGemmaApp:
                         value="SOAP note will appear here after analysis..."
                     )
 
+                    # Follow-up section (HIDDEN by default, shown on agentic pause)
+                    with gr.Group(visible=False) as followup_group:
+                        gr.Markdown("---\n### Reply to Agent\nProvide the missing information the agent requested above:")
+                        followup_input = gr.Textbox(
+                            label="Your Response",
+                            placeholder="e.g., The patient is a 10-month-old female. Symptoms include itching for 6 months. No family history of skin conditions...",
+                            lines=3
+                        )
+                        followup_btn = gr.Button(
+                            "Submit Follow-up",
+                            variant="primary",
+                            size="md"
+                        )
+
                     # Clinical reasoning trace accordion
                     with gr.Accordion("Clinical Reasoning Trace", open=False):
                         thinking_output = gr.Markdown(
@@ -532,6 +724,8 @@ class MedGemmaApp:
                 )
 
             # Event handlers
+
+            # Main submit button
             submit_btn.click(
                 fn=self.process_case,
                 inputs=[
@@ -546,7 +740,20 @@ class MedGemmaApp:
                 outputs=[
                     soap_output,
                     thinking_output,
-                    citations_output
+                    citations_output,
+                    followup_group
+                ]
+            )
+
+            # Follow-up button (answers agent's clarification questions)
+            followup_btn.click(
+                fn=self.process_followup,
+                inputs=[followup_input],
+                outputs=[
+                    soap_output,
+                    thinking_output,
+                    citations_output,
+                    followup_group
                 ]
             )
 

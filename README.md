@@ -14,17 +14,20 @@ This "Partner-Style" Clinical Assistant uses a hierarchical multi-agent workflow
 
 ### Hybrid Two-Tier System
 
-**TIER 1: Orchestration (Google ADK + Gemini Pro Latest)**
+
+**TIER 1: Clinical Reasoning (MedGemma-27B-IT Specialist)**
+- **Model**: MedGemma-27B-IT via Hugging Face Transformers
+- **Role**: Medical diagnosis, clinical analysis, SOAP generation
+- **Responsibility**: ALL high-stakes medical reasoning
+- **Invoked via**: FunctionTools (`medgemma_triage_analysis`, `medgemma_guideline_synthesis`, `medgemma_clinical_diagnosis`)
+
+
+**TIER 2: Orchestration (Google ADK + Gemini Pro Latest)**
 - **Framework**: Google Agent Development Kit (ADK) v1.23.0
 - **Model**: Gemini Pro Latest
 - **Role**: Workflow management, agent routing, tool coordination
 - **Responsibility**: Delegates tasks but does NOT perform clinical reasoning
 
-**TIER 2: Clinical Reasoning (MedGemma-27B-IT Specialist)**
-- **Model**: MedGemma-27B-IT via Hugging Face Transformers
-- **Role**: Medical diagnosis, clinical analysis, SOAP generation
-- **Responsibility**: ALL high-stakes medical reasoning
-- **Invoked via**: FunctionTools (`medgemma_triage_analysis`, `medgemma_guideline_synthesis`, `medgemma_clinical_diagnosis`)
 
 ### Why This Architecture?
 
@@ -234,7 +237,7 @@ MedGemma/
 ### 1. Clone and Install
 
 ```bash
-cd "D:\Halima's Data\more\LLM_Udemy\MedGemma"
+cd "My path\MedGemma"
 pip install -r requirements.txt
 ```
 
@@ -245,16 +248,16 @@ pip install -r requirements.txt
 
 ### 2. Configure API Keys
 
-Copy the environment template and add your API keys:
+Copy the environment template and add My API keys:
 
 ```bash
 copy .env.template .env
 ```
 
 Edit `.env` and add:
-- `HUGGINGFACE_API_KEY`: Your Hugging Face API key (for MedGemma-27B-IT clinical reasoning)
-- `GEMINI_API_KEY`: Your Google Gemini API key (for Gemini Pro Latest orchestration)
-- `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID (for ADK v1.23.0)
+- `HUGGINGFACE_API_KEY`: My Hugging Face API key (for MedGemma-27B-IT clinical reasoning)
+- `GEMINI_API_KEY`: My Google Gemini API key (for Gemini Pro Latest orchestration)
+- `GOOGLE_CLOUD_PROJECT`: My Google Cloud project ID (for ADK v1.23.0)
 
 ### 3. Ingest Guidelines
 
@@ -337,5 +340,8 @@ This project is for educational and competition purposes. Medical guidelines are
 ## Acknowledgments
 
 - Google Med-Gemma team
+- Gemini
+- Google ADK
+- Google Gen AI
 - American Academy of Dermatology (AAD)
 - StatPearls Publishing

@@ -46,7 +46,6 @@ class MedGemmaApp:
         self.conversation_history = []
         self.is_analyzing = False
         self.uploaded_files = []
-        self.manual_data = {}
 
         logger.info("MedGemmaApp initialized (HTML Design Match)")
 
@@ -92,78 +91,55 @@ class MedGemmaApp:
 
         return f"session_{counter:03d}"
 
-    def build_case_from_inputs(
-        self,
-        text_input: str,
-        history: str = "",
-        exam: str = "",
-        age: Optional[int] = None,
-        gender: Optional[str] = None,
-        duration: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Build case dictionary from inputs."""
-        case_data = {"context_state": "original"}
+    def build_case_from_inputs(self, text_input: str, file_list: List[str] = None, session_id: str = None) -> Dict[str, Any]:
+        """Build case dictionary from text input and uploaded files."""
+        case_data = {
+            "case_id": f"ui_{session_id or 'unknown'}",
+            "context_state": "original",
+        }
 
-        # Priority: manual fields > text input
-        if history or exam or age or gender or duration:
-            if history:
-                case_data["history"] = history
-            if exam:
-                case_data["exam"] = exam
-            if age:
-                case_data["age"] = age
-            if gender:
-                case_data["gender"] = gender
-            if duration:
-                case_data["duration"] = duration
-        elif text_input:
+        if text_input:
             case_data["history"] = text_input
 
         # Process uploaded files
-        if self.uploaded_files:
-            for file_path in self.uploaded_files:
-                file_ext = file_path.lower() if isinstance(file_path, str) else file_path.name.lower()
+        files = file_list or []
+        for file_path in files:
+            file_ext = file_path.lower() if isinstance(file_path, str) else file_path.name.lower()
 
-                if any(file_ext.endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
-                    case_data["image"] = Image.open(file_path)
-                elif any(file_ext.endswith(ext) for ext in ['.json', '.txt', '.pdf']):
-                    file_data = self.parse_case_file(file_path)
-                    if file_data:
-                        case_data.update(file_data)
+            if any(file_ext.endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
+                case_data["image_data"] = Image.open(file_path)
+            elif any(file_ext.endswith(ext) for ext in ['.json', '.txt', '.pdf']):
+                file_data = self.parse_case_file(file_path)
+                if file_data:
+                    case_data.update(file_data)
 
         return case_data
 
-    def process_case(
-        self,
-        text_input: str,
-        history: str,
-        exam: str,
-        age: Optional[int],
-        gender: Optional[str],
-        duration: Optional[str]
-    ):
-        """Process initial case submission. Generator for streaming updates."""
+    def process_case(self, text_input: str, file_list: List[str] = None):
+        """Process case submission. Generator for streaming updates."""
         self.is_analyzing = True
 
-        # Build case from inputs BEFORE clearing
-        case_data = self.build_case_from_inputs(text_input, history, exam, age, gender, duration)
-        self.uploaded_files = []
+        # Generate session_id once, use for both case_id and workflow
+        session_id = self.get_next_session_id()
 
-        # STATE: Analyzing
+        # Build case from inputs BEFORE clearing
+        case_data = self.build_case_from_inputs(text_input, file_list, session_id)
+
+        # STATE: Analyzing — yield 6 outputs matching UI components
         yield (
             "Processing your case...",  # soap_output
             "",  # reasoning_output
             "",  # citations_output
             "",  # text_input cleared
             gr.update(value="Analyzing...", interactive=False),  # analyze_btn
+            gr.update(visible=False),  # reset_btn hidden during analysis
         )
 
         try:
             self.current_case = ClinicalCase(**case_data)
-            session_id = self.get_next_session_id()
 
             logger.info(f"Starting workflow for {session_id}")
-            result = asyncio.run(self.workflow.run_case(self.current_case, session_id))
+            result = asyncio.run(self.workflow.run_async(self.current_case))
 
             soap_note = result.get("soap_note", "No diagnosis generated.")
             reasoning = self._extract_thinking_process(result.get("raw_response", ""))
@@ -184,7 +160,8 @@ class MedGemmaApp:
                     reasoning,
                     citations,
                     "",
-                    gr.update(value="Submit Follow-up", interactive=True),
+                    gr.update(value="Follow-up", interactive=True),
+                    gr.update(visible=True),  # show reset button
                 )
             else:
                 # Completed
@@ -197,6 +174,7 @@ class MedGemmaApp:
                     citations,
                     "",
                     gr.update(value="Analyze Case", interactive=True),
+                    gr.update(visible=False),  # reset stays hidden
                 )
 
         except Exception as e:
@@ -209,6 +187,7 @@ class MedGemmaApp:
                 "",
                 "",
                 gr.update(value="Analyze Case", interactive=True),
+                gr.update(visible=False),
             )
 
     def _format_agentic_pause(self, missing_items: List[str], questions: List[str]) -> str:
@@ -305,19 +284,26 @@ html, body {
 /* ===== FORCE CONSISTENT FONT SCALING ===== */
 :root {
     font-size: 16px !important;
-    --background-fill-primary: #fff !important;
-    --background-fill-secondary: #fff !important;
-    --block-background-fill: #fff !important;
-    --panel-background-fill: #fff !important;
-    --body-background-fill: #fff !important;
+
+    /* Gradio theme variables */
+    --background-fill-primary: #ffffff !important;
+    --background-fill-secondary: #ffffff !important;
+    --block-background-fill: #ffffff !important;
+    --panel-background-fill: #ffffff !important;
+    --body-background-fill: #ffffff !important;
+
+    /* Explicit fallback */
+    background-color: #ffffff !important;
 }
 
 body {
-    font-size: 1rem !important;
+    font-size: 1rem !important; 
+    background-color:#fff;
 }
 
 /* ===== HIDDEN FILE UPLOAD ===== */
-#hidden-file-upload {
+#hidden-file-upload,
+#remove-file-idx {
     position: absolute !important;
     width: 0 !important;
     height: 0 !important;
@@ -339,6 +325,7 @@ body {
 }
 
 /* ===== PINNED INPUT SECTION ===== */
+
 #input-section {
     position: fixed !important;
     bottom: 0 !important;
@@ -346,7 +333,7 @@ body {
     transform: translateX(-50%) !important;
     width: 100% !important;
     max-width: 1200px !important;
-    background: #fff !important;
+    background-color: #fff !important;
     z-index: 1000 !important;
     padding: 12px 16px !important;
     border-top: 1px solid #ddd !important;
@@ -375,26 +362,10 @@ body {
     
 }
 
-/* Target the REAL flex container that Gradio renders inside the elem_id wrapper */
-#input-btn-row .gr-row {
-  display: flex !important;
-  justify-content: center !important;  /* center the 3 buttons */
-  gap: 12px !important;               /* space between buttons */
-  column-gap: 12px !important;
-  flex-wrap: nowrap !important;
-  align-items: center !important;
-}
-
-/* Prevent Gradio wrappers from stretching */
-#input-btn-row .gr-row > * {
-  flex: 0 0 auto !important;
-  width: auto !important;
-  min-width: unset !important;
-}
 
 /* Extra-safe fallback: if gap still doesn't show, force margin */
 #input-btn-row button {
-  margin: 0 6px !important;   /* 6px left + 6px right = 12px gap */
+  margin: 0 50px !important;   /* 6px left + 6px right = 12px gap */
 }
 
 
@@ -416,6 +387,13 @@ hr {
 .gr-markdown.gr-block {
   padding-top: 2px !important;
   padding-bottom: 2px !important;
+}
+/* Smaller placeholder text inside textbox */
+#input-section textarea::placeholder {
+    font-size: 11px !important;
+    font-style: italic;
+    background-color: transparent !important;
+
 }
 
 
@@ -489,136 +467,135 @@ hr {
 
             # PINNED BOTTOM INPUT SECTION
             with gr.Group(elem_id="input-section"):
-                gr.Markdown( "<div style='padding-left:16px; padding-top:8px;  padding-bottom:8px;'>" 
-			     "<span style='font-size:13px; font-weight:600;'>Clinical Case Input</span>"
-                             "</div>")
+                gr.Markdown(
+                    "<div style='padding-left:16px; padding-top:8px; padding-bottom:4px;'>"
+                    "<span style='font-size:13px; font-weight:600;'>Clinical Case Input</span>"
+                    "</div>"
+                )
 
                 text_input = gr.Textbox(
-                    placeholder="Describe case or attach file...",
-                    lines=4,
+                    placeholder=(
+                        "Describe your case (history, exam findings, age, symptoms, duration...) "
+                        "and/or attach files (image, PDF, JSON, text -- max 3 files). "
+                        "Or click an example from above for quick analysis."
+                    ),
+                    lines=5,
                     show_label=False,
                 )
 
+                # State to track attached files (list of file paths)
+                file_state = gr.State([])
+
+                # Row showing attached filenames with X buttons
+                file_display = gr.HTML(value="", elem_id="file-display")
+
                 with gr.Row(elem_id="input-btn-row"):
-                    attach_btn = gr.Button("📎 Attach", variant="secondary", scale=0)
-                    manual_btn = gr.Button("✏️ Manual Input", variant="secondary", scale=0)
-                    analyze_btn = gr.Button("Analyze Case", variant="primary",  scale=0)
-
-            # MODAL - Using native Gradio (visible toggle)
-            modal_visible = gr.State(False)
-
-            with gr.Group(visible=False) as modal_backdrop:
-                gr.Markdown("### Manual Input Fields")
-
-                history_input = gr.Textbox(
-                    label="Patient History",
-                    placeholder="65-year-old man with itchy red rash on elbows for 3 weeks",
-                    lines=3
-                )
-
-                exam_input = gr.Textbox(
-                    label="Physical Examination",
-                    placeholder="Erythematous plaques with silvery scales on bilateral elbows",
-                    lines=3
-                )
-
-                with gr.Row():
-                    age_input = gr.Number(
-                        label="Age (years)",
-                        minimum=0,
-                        maximum=120,
-                        value=None
-                    )
-
-                    gender_input = gr.Dropdown(
-                        label="Gender",
-                        choices=["male", "female", "other"],
-                        value=None
-                    )
-
-                duration_input = gr.Textbox(
-                    label="Symptom Duration",
-                    placeholder="3 weeks"
-                )
-
-                with gr.Row():
-                    cancel_btn = gr.Button("Cancel", variant="secondary")
-                    analyze_close_btn = gr.Button("Analyze & Close", variant="primary")
+                    attach_btn = gr.Button("Attach", variant="secondary", scale=0,size='sm')
+                    reset_btn = gr.Button("Reset", variant="secondary", scale=0, visible=False,size='sm')
+                    analyze_btn = gr.Button("Analyze Case", variant="primary", scale=0,size='sm')
 
             # EVENT HANDLERS
 
-            # Track uploaded files
-            def track_uploads(files):
-                if files:
-                    self.uploaded_files = files if isinstance(files, list) else [files]
-                else:
-                    self.uploaded_files = []
-                return files
+            def format_file_display(file_list):
+                """Generate HTML for attached file names with X buttons."""
+                if not file_list:
+                    return ""
+                html_parts = []
+                for i, fp in enumerate(file_list):
+                    name = os.path.basename(fp)
+                    if len(name) > 50:
+                        name = name[:50] + "..."
+                    html_parts.append(
+                        f"<span style='display:inline-flex; align-items:center; "
+                        f"background:#f0f0f0; border:1px solid #ddd; border-radius:4px; "
+                        f"padding:2px 8px; margin:2px 4px; font-size:11px;'>"
+                        f"{name}"
+                        f"<button onclick=\"var el=document.querySelector('#remove-file-idx textarea')||document.querySelector('#remove-file-idx input');if(el){{el.value='{i}';el.dispatchEvent(new Event('input',{{bubbles:true}}));}}\""
+                        f" style='border:none; background:none; cursor:pointer; "
+                        f"margin-left:6px; font-size:13px; color:#999;'>x</button>"
+                        f"</span>"
+                    )
+                return "<div style='padding:4px 0;'>" + "".join(html_parts) + "</div>"
+
+            # Track uploaded files from hidden gr.File
+            def on_file_upload(files, current_files):
+                """Add newly uploaded files to the list (max 3)."""
+                if not files:
+                    return current_files, format_file_display(current_files), None
+                new_files = files if isinstance(files, list) else [files]
+                updated = list(current_files) if current_files else []
+                for f in new_files:
+                    if len(updated) >= 3:
+                        break
+                    updated.append(f)
+                return updated, format_file_display(updated), None
 
             file_upload.change(
-                fn=track_uploads,
-                inputs=[file_upload],
-                outputs=[file_upload]
+                fn=on_file_upload,
+                inputs=[file_upload, file_state],
+                outputs=[file_state, file_display, file_upload]
             )
 
-            # Attach button - directly open system file browser (one click)
+            # Attach button - directly open system file browser
             attach_btn.click(
                 fn=None,
                 js="() => { const el = document.querySelector('#hidden-file-upload input[type=file]'); if (el) el.click(); }"
             )
 
-            # Manual button - open modal
-            def open_modal():
-                return gr.update(visible=True)
+            # Remove file by index (triggered by X button JS)
+            remove_idx = gr.Textbox(value="", elem_id="remove-file-idx")
 
-            manual_btn.click(
-                fn=open_modal,
-                outputs=[modal_backdrop]
+            def remove_file(idx_str, current_files):
+                """Remove a file from the list by index."""
+                if not idx_str or not current_files:
+                    return current_files, format_file_display(current_files), ""
+                try:
+                    idx = int(idx_str)
+                    updated = list(current_files)
+                    if 0 <= idx < len(updated):
+                        updated.pop(idx)
+                    return updated, format_file_display(updated), ""
+                except (ValueError, IndexError):
+                    return current_files, format_file_display(current_files), ""
+
+            remove_idx.input(
+                fn=remove_file,
+                inputs=[remove_idx, file_state],
+                outputs=[file_state, file_display, remove_idx]
             )
 
-            # Cancel button - close modal
-            def close_modal():
-                return gr.update(visible=False)
+            # Analyze Case / Follow-up button
+            def on_analyze(text, files):
+                """Wrapper to call process_case with current files."""
+                file_list = files if files else []
+                yield from self.process_case(text, file_list)
 
-            cancel_btn.click(
-                fn=close_modal,
-                outputs=[modal_backdrop]
+            analyze_btn.click(
+                fn=on_analyze,
+                inputs=[text_input, file_state],
+                outputs=[soap_output, reasoning_output, citations_output, text_input, analyze_btn, reset_btn]
             )
 
-            # Analyze & Close button - save data, close modal, and trigger analysis
-            def analyze_and_close(history, exam, age, gender, duration):
-                """Save manual data, close modal, and trigger analysis immediately."""
-                # Save to manual_data
-                self.manual_data = {
-                    "history": history,
-                    "exam": exam,
-                    "age": age,
-                    "gender": gender,
-                    "duration": duration
-                }
-
-                # Close modal and trigger analysis
+            # Reset button - clear everything, back to initial state
+            def on_reset():
+                """Reset all state back to initial."""
+                self.current_case = None
+                self.current_session = None
+                self.is_analyzing = False
                 return (
-                    gr.update(visible=False),  # modal_backdrop
-                    gr.update(value="trigger_analysis")  # signal to trigger analysis
+                    "",  # soap_output
+                    "<span style='font-size:9px;'>Detailed clinical reasoning will be displayed here after case analysis.</span>",  # reasoning
+                    "<span style='font-size:9px;'>Relevant clinical guidelines and evidence-based references will be displayed here.</span>",  # citations
+                    "",  # text_input
+                    [],  # file_state
+                    "",  # file_display
+                    gr.update(value="Analyze Case", interactive=True),  # analyze_btn
+                    gr.update(visible=False),  # reset_btn
                 )
 
-            analyze_close_btn.click(
-                fn=analyze_and_close,
-                inputs=[history_input, exam_input, age_input, gender_input, duration_input],
-                outputs=[modal_backdrop, text_input]
-            ).then(
-                # Immediately trigger analysis with manual data
-                fn=lambda txt, h, e, a, g, d: self.process_case(txt, h, e, a, g, d),
-                inputs=[text_input, history_input, exam_input, age_input, gender_input, duration_input],
-                outputs=[soap_output, reasoning_output, citations_output, text_input, analyze_btn]
-            )
-
-            # Analyze Case button - normal analysis
-            analyze_btn.click(
-                fn=lambda txt, h, e, a, g, d: self.process_case(txt, h, e, a, g, d),
-                inputs=[text_input, history_input, exam_input, age_input, gender_input, duration_input],
-                outputs=[soap_output, reasoning_output, citations_output, text_input, analyze_btn]
+            reset_btn.click(
+                fn=on_reset,
+                outputs=[soap_output, reasoning_output, citations_output, text_input, file_state, file_display, analyze_btn, reset_btn]
             )
 
         return app

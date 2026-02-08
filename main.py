@@ -59,11 +59,15 @@ def run_evaluation():
     """Run evaluation on the 25 test cases."""
     logger.info("Starting evaluation pipeline...")
     try:
-        from src.evaluation.evaluator import run_evaluation
-        run_evaluation()
+        import asyncio
+        from src.evaluation.evaluator import main as evaluator_main
+        asyncio.run(evaluator_main())
     except ImportError as e:
         logger.error(f"Failed to import evaluation module: {e}")
         logger.info("Make sure you've completed Step 5 (Evaluation Setup)")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error during evaluation: {e}")
         sys.exit(1)
 
 

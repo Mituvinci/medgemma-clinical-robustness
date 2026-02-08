@@ -42,9 +42,10 @@ class MedGemmaApp:
             use_medgemma=True
         )
         self.current_case = None
-        self.current_session = None
+        self.current_session = None  # Session object (not just ID)
         self.conversation_history = []
         self.is_analyzing = False
+        self.in_followup_mode = False  # Track if we're waiting for follow-up
         self.uploaded_files = []
 
         logger.info("MedGemmaApp initialized (HTML Design Match)")
@@ -141,31 +142,35 @@ class MedGemmaApp:
             logger.info(f"Starting workflow for {session_id}")
             result = asyncio.run(self.workflow.run_async(self.current_case))
 
-            soap_note = result.get("soap_note", "No diagnosis generated.")
-            reasoning = self._extract_thinking_process(result.get("raw_response", ""))
-            citations = self._extract_citations(result.get("raw_response", ""))
+            # run_async returns "response" (full agent output), not "soap_note"
+            response_text = result.get("response", "No diagnosis generated.")
+            soap_note = response_text
+            reasoning = self._extract_thinking_process(response_text)
+            citations = self._extract_citations(response_text)
 
-            # Check if agentic pause triggered
-            if result.get("missing_data") or result.get("questions"):
-                pause_msg = self._format_agentic_pause(
-                    result.get("missing_data", []),
-                    result.get("questions", [])
-                )
+            # Check if agentic pause triggered (agent asks for missing info)
+            # IMPROVED: Check for questions but no SOAP sections
+            is_pause = self._detect_missing_data(response_text)
+            if is_pause:
+                pause_msg = response_text  # Agent's own message asking for info
 
-                self.current_session = session_id
+                # Store the session OBJECT (not just ID) for continuation
+                self.current_session = result.get("_session")
+                self.in_followup_mode = True
                 self.is_analyzing = False
 
                 yield (
-                    pause_msg,
+                    self._format_clarification_request(pause_msg),
                     reasoning,
                     citations,
                     "",
-                    gr.update(value="Follow-up", interactive=True),
+                    gr.update(value="Submit Follow-up", interactive=True),
                     gr.update(visible=True),  # show reset button
                 )
             else:
                 # Completed
                 self.is_analyzing = False
+                self.in_followup_mode = False
                 self.current_session = None
 
                 yield (
@@ -180,6 +185,8 @@ class MedGemmaApp:
         except Exception as e:
             logger.error(f"Error in process_case: {e}")
             self.is_analyzing = False
+            self.in_followup_mode = False
+            self.current_session = None
 
             yield (
                 f"Error: {str(e)}",
@@ -190,8 +197,158 @@ class MedGemmaApp:
                 gr.update(visible=False),
             )
 
+    def process_followup(self, user_response: str):
+        """
+        Process follow-up response after agentic pause.
+        Continues existing session instead of creating new one.
+        """
+        if not self.in_followup_mode or not self.current_session:
+            logger.error("process_followup called but not in follow-up mode")
+            yield (
+                "Error: Not in follow-up mode. Please start a new case.",
+                "",
+                "",
+                "",
+                gr.update(value="Analyze Case", interactive=True),
+                gr.update(visible=False),
+            )
+            return
+
+        self.is_analyzing = True
+
+        # STATE: Analyzing
+        yield (
+            "Processing your follow-up response...",
+            "",
+            "",
+            "",
+            gr.update(value="Analyzing...", interactive=False),
+            gr.update(visible=False),
+        )
+
+        try:
+            logger.info(f"Continuing session {self.current_session.session_id} with follow-up")
+
+            # Continue existing session with user's response
+            result = asyncio.run(
+                self.workflow.run_async(
+                    self.current_case,
+                    user_message=f"Additional information from user: {user_response}",
+                    existing_session=self.current_session
+                )
+            )
+
+            response_text = result.get("response", "No response generated.")
+            soap_note = response_text
+            reasoning = self._extract_thinking_process(response_text)
+            citations = self._extract_citations(response_text)
+
+            # Check if STILL paused (might need more info)
+            is_still_paused = self._detect_missing_data(response_text)
+
+            if is_still_paused:
+                # Still missing data
+                logger.info("Agent still requesting more information")
+                self.is_analyzing = False
+                # Keep followup mode active
+
+                yield (
+                    self._format_clarification_request(response_text),
+                    reasoning,
+                    citations,
+                    "",
+                    gr.update(value="Submit Follow-up", interactive=True),
+                    gr.update(visible=True),
+                )
+            else:
+                # Completed! Save the session now
+                logger.info(f"Follow-up complete. Saving session {self.current_session.session_id}")
+
+                # Save the session (run_async didn't save it because existing_session was provided)
+                result["_session"].set_final_output(result)
+                from src.agents.conversation_manager import get_conversation_manager
+                get_conversation_manager().complete_session(self.current_session.session_id, save=True)
+
+                # Reset state
+                self.is_analyzing = False
+                self.in_followup_mode = False
+                self.current_session = None
+
+                yield (
+                    self._format_soap_response(soap_note),
+                    reasoning,
+                    citations,
+                    "",
+                    gr.update(value="Analyze Case", interactive=True),
+                    gr.update(visible=False),
+                )
+
+        except Exception as e:
+            logger.error(f"Error in process_followup: {e}")
+            self.is_analyzing = False
+            self.in_followup_mode = False
+            self.current_session = None
+
+            yield (
+                f"Error processing follow-up: {str(e)}",
+                "",
+                "",
+                "",
+                gr.update(value="Analyze Case", interactive=True),
+                gr.update(visible=False),
+            )
+
+    def _detect_missing_data(self, response: str) -> bool:
+        """
+        Detect if agent is requesting missing data (agentic pause).
+
+        IMPROVED DETECTION:
+        - Checks for questions (contains '?')
+        - Checks for missing SOAP sections (no complete diagnosis)
+        - Checks for explicit missing data keywords
+
+        Returns True if agent needs more information.
+        """
+        response_lower = response.lower()
+
+        # Check 1: Does response contain questions?
+        has_questions = "?" in response
+
+        # Check 2: Does response have complete SOAP sections?
+        has_subjective = "subjective" in response_lower
+        has_assessment = "assessment" in response_lower
+        has_complete_soap = has_subjective and has_assessment
+
+        # Check 3: Explicit missing data keywords
+        missing_keywords = [
+            "missing", "insufficient", "clarification",
+            "please provide", "could you", "would you",
+            "need more", "require additional", "lacking"
+        ]
+        has_missing_keywords = any(keyword in response_lower[:500] for keyword in missing_keywords)
+
+        # Agentic pause if:
+        # - Has questions AND no complete SOAP, OR
+        # - Has explicit missing data keywords
+        is_pause = (has_questions and not has_complete_soap) or has_missing_keywords
+
+        if is_pause:
+            logger.info(f"Agentic pause detected: questions={has_questions}, soap={has_complete_soap}, keywords={has_missing_keywords}")
+
+        return is_pause
+
+    def _format_clarification_request(self, response: str) -> str:
+        """Format agent's clarification request with prominent warning."""
+        formatted = "## AGENTIC PAUSE: Missing Critical Data\n\n"
+        formatted += "**The agent has paused to request essential clinical context before providing a diagnosis.**\n\n"
+        formatted += "---\n\n"
+        formatted += response
+        formatted += "\n\n---\n\n"
+        formatted += "**Next Step:** Please provide the requested information in the text box above and click 'Submit Follow-up'.\n"
+        return formatted
+
     def _format_agentic_pause(self, missing_items: List[str], questions: List[str]) -> str:
-        """Format agentic pause message."""
+        """Format agentic pause message (legacy - keeping for compatibility)."""
         msg = "## Agentic Pause: Missing Information\n\n"
         msg += "The agent has paused to request critical clinical context before diagnosing.\n\n"
 
@@ -564,11 +721,19 @@ hr {
                 outputs=[file_state, file_display, remove_idx]
             )
 
-            # Analyze Case / Follow-up button
+            # Analyze Case / Follow-up button (routes based on mode)
             def on_analyze(text, files):
-                """Wrapper to call process_case with current files."""
-                file_list = files if files else []
-                yield from self.process_case(text, file_list)
+                """
+                Route to either process_case (new case) or process_followup (continuation).
+                Determines routing based on in_followup_mode flag.
+                """
+                if self.in_followup_mode:
+                    # Follow-up mode: continue existing session
+                    yield from self.process_followup(text)
+                else:
+                    # New case mode
+                    file_list = files if files else []
+                    yield from self.process_case(text, file_list)
 
             analyze_btn.click(
                 fn=on_analyze,
@@ -582,6 +747,7 @@ hr {
                 self.current_case = None
                 self.current_session = None
                 self.is_analyzing = False
+                self.in_followup_mode = False
                 return (
                     "",  # soap_output
                     "<span style='font-size:9px;'>Detailed clinical reasoning will be displayed here after case analysis.</span>",  # reasoning

@@ -282,7 +282,7 @@ Provide your analysis as a structured response."""
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
-            max_tokens=500,
+            max_tokens=1000,  # Increased for detailed completeness analysis
             temperature=0.3
         )
 
@@ -346,7 +346,7 @@ Provide a structured synthesis focusing on differential diagnosis support."""
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
-            max_tokens=800,
+            max_tokens=2000,  # Increased for comprehensive guideline synthesis
             temperature=0.4
         )
 
@@ -431,7 +431,7 @@ Format your response as a structured SOAP note with clear section headers."""
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
-            max_tokens=1500,
+            max_tokens=3000,  # Increased for complete SOAP note with extensive differentials
             temperature=0.3
         )
 

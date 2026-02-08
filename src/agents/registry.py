@@ -11,6 +11,7 @@ from config.config import settings
 
 from src.agents.models.medgemma_adapter import MedGemmaAdapter
 from src.agents.models.gemini_adapter import GeminiAdapter
+from src.agents.models.vertex_medgemma_adapter import VertexMedGemmaAdapter
 from src.agents.models.openai_adapter import OpenAIAdapter
 from src.agents.models.claude_adapter import ClaudeAdapter
 
@@ -56,6 +57,30 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "General medical questions",
             "Complex reasoning",
             "Multimodal analysis (future)"
+        ]
+    },
+
+    # ====== VERTEX AI MODELS (Deployed endpoints) ======
+
+    "medgemma-vertex": {
+        "adapter": VertexMedGemmaAdapter,
+        "status": "active",
+        "description": "MedGemma-1.5-4B-IT via Vertex AI endpoint",
+        "provider": "vertex_ai",
+        "requires": "GOOGLE_APPLICATION_CREDENTIALS",
+        "model_id": "medgemma-1.5-4b-it",
+        "project_id": settings.google_cloud_project,
+        "region": "us-central1",
+        "endpoint_id": "mg-endpoint-1ff3d7b0-09eb-4d7a-9711-d87765fa40c9",
+        "strengths": [
+            "Medical knowledge",
+            "Fast inference (4B params)",
+            "Cloud-hosted (no local GPU needed)"
+        ],
+        "use_cases": [
+            "Clinical diagnosis",
+            "Multi-model comparison",
+            "Lightweight medical reasoning"
         ]
     },
 

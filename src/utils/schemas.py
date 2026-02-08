@@ -13,6 +13,7 @@ class ContextState(str, Enum):
     ORIGINAL = "original"
     HISTORY_ONLY = "history_only"
     IMAGE_ONLY = "image_only"
+    EXAM_ONLY = "exam_only"
     EXAM_RESTRICTED = "exam_restricted"
 
 

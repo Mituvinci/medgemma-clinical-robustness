@@ -103,9 +103,8 @@ def _get_medgemma_specialist():
 
     # Check if we should use Gemini instead of MedGemma
     if _agent_model_choice == "gemini":
-        # Use Gemini for baseline comparison
         from src.agents.models.gemini_adapter import GeminiAdapter
-        logger.info("🔄 Using Gemini Pro for agent reasoning (baseline comparison)")
+        logger.info("Using Gemini Pro for agent reasoning (baseline comparison)")
         if _medgemma_specialist is None or not isinstance(_medgemma_specialist, GeminiAdapter):
             _medgemma_specialist = GeminiAdapter(
                 model_id=settings.gemini_model_id,
@@ -113,9 +112,24 @@ def _get_medgemma_specialist():
             )
         return _medgemma_specialist
 
-    # Use MedGemma (default/specialized)
+    # Check if we should use Vertex AI MedGemma
+    if _agent_model_choice == "medgemma-vertex":
+        from src.agents.models.vertex_medgemma_adapter import VertexMedGemmaAdapter
+        from src.agents.registry import MODEL_REGISTRY
+        logger.info("Using MedGemma via Vertex AI for agent reasoning")
+        if _medgemma_specialist is None or not isinstance(_medgemma_specialist, VertexMedGemmaAdapter):
+            vertex_config = MODEL_REGISTRY["medgemma-vertex"]
+            _medgemma_specialist = VertexMedGemmaAdapter(
+                model_id=vertex_config["model_id"],
+                project_id=vertex_config["project_id"],
+                region=vertex_config["region"],
+                endpoint_id=vertex_config["endpoint_id"]
+            )
+        return _medgemma_specialist
+
+    # Use MedGemma local GPU (default/specialized)
     if _medgemma_specialist is None or not isinstance(_medgemma_specialist, MedGemmaAdapter):
-        logger.info("🧬 Using MedGemma-27B-IT for agent reasoning (specialized)")
+        logger.info("Using MedGemma-27B-IT for agent reasoning (specialized)")
         _medgemma_specialist = MedGemmaAdapter(
             model_id=settings.medgemma_model_id,
             api_key=settings.huggingface_api_key

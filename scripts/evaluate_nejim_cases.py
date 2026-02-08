@@ -40,13 +40,25 @@ logger = logging.getLogger(__name__)
 class NEJIMEvaluator:
     """Evaluator for NEJIM Image Challenge cases."""
 
-    def __init__(self, model_name: str = "gemini-pro-latest"):
-        """Initialize evaluator."""
+    def __init__(self, model_name: str = "gemini-pro-latest", agent_model: str = "medgemma"):
+        """
+        Initialize evaluator.
+
+        Args:
+            model_name: Gemini model for ADK orchestration
+            agent_model: Model for clinical reasoning ("medgemma", "medgemma-vertex", "gemini")
+        """
         self.workflow = create_workflow(
             model_name=model_name,
             use_medgemma=True
         )
+        # Override agent model choice if specified
+        if agent_model != "medgemma":
+            self.workflow.agent_model = agent_model
+            import src.agents.adk_agents as adk_mod
+            adk_mod._agent_model_choice = agent_model
         self.model_name = model_name
+        self.agent_model = agent_model
 
     def find_nejim_cases(self, nejim_dir: str) -> List[str]:
         """Find all case IDs in NEJIM directory."""
@@ -74,7 +86,7 @@ class NEJIMEvaluator:
         Args:
             nejim_dir: Path to NEJIM folder
             case_id: Case ID (e.g., "01_02_25")
-            variant: One of: "original", "history", "image_only", "exam_restricted"
+            variant: One of: "original", "history_only", "image_only", "exam_only", "exam_restricted"
 
         Returns:
             Dict with case data
@@ -84,10 +96,12 @@ class NEJIMEvaluator:
         # Read the appropriate text file
         if variant == "original":
             text_file = nejim_path / f"{case_id}_original.txt"
-        elif variant == "history":
+        elif variant == "history_only":
             text_file = nejim_path / f"{case_id}_history.txt"
         elif variant == "image_only":
             text_file = nejim_path / f"{case_id}_image_only.txt"
+        elif variant == "exam_only":
+            text_file = nejim_path / f"{case_id}_exam.txt"
         elif variant == "exam_restricted":
             text_file = nejim_path / f"{case_id}_exam_restricted.txt"
         else:
@@ -109,7 +123,7 @@ class NEJIMEvaluator:
 
         # For image_only variant, we have image + minimal text
         # For other variants, we may or may not have image
-        use_image = (variant == "image_only" or variant == "original") and image_path is not None
+        use_image = variant in ("image_only", "original") and image_path is not None
 
         return {
             "case_id": f"NEJIM_{case_id}_{variant}",
@@ -190,12 +204,49 @@ class NEJIMEvaluator:
         has_questions = "?" in response
         has_soap = "subjective" in response_lower and "assessment" in response_lower
 
-        # Check for missing data keywords
-        missing_keywords = [
-            "missing", "insufficient", "clarification",
-            "please provide", "could you", "need more", "require additional"
+        # Check for missing data keywords in first 500 chars,
+        # but exclude false positives like "Missing Items: None"
+        first_500 = response_lower[:500]
+
+        # Phrases that indicate NO missing data (false positive patterns)
+        # Note: first_500 is already lowercased so "None"/"NONE" are matched as "none"
+        no_missing_phrases = [
+            "missing items: none", "missing items**: none",
+            "missing: none", "missing data: none",
+            "missing items:** none", "no missing",
+            "missing items:\n- none", "missing items:\n*   none",
+            "missing items:**\n- none", "missing items:**\n*   none",
+            "missing items:\n-   none", "missing items:\n* none",
+            "missing data identified**: `patient_age` (note:",
+            "flagged it as missing. this was overridden",
+            "flagged `patient_age` as missing, but",
+            "flagged as missing, but the specialist noted",
+            "sufficient data to proceed",
+            "sufficient data for analysis",
+            "case data is sufficient",
+            "has sufficient information",
+            "case is complete",
+            "data is complete",
         ]
-        has_missing = any(kw in response_lower[:500] for kw in missing_keywords)
+        has_no_missing_statement = any(p in first_500 for p in no_missing_phrases)
+
+        # If triage says "Missing Items: None" or similar AND we have a full SOAP,
+        # it's not a real pause
+        if has_soap and has_no_missing_statement:
+            return False
+
+        # Only flag as missing if keywords appear AND it's not a "none" statement
+        pause_keywords = [
+            "insufficient", "please provide", "could you provide",
+            "need more", "require additional",
+            "request clarification", "cannot proceed"
+        ]
+        has_pause_keyword = any(kw in first_500 for kw in pause_keywords)
+
+        # Check for "missing" keyword only if not negated
+        has_missing_flag = "missing" in first_500 and not has_no_missing_statement
+
+        has_missing = has_pause_keyword or has_missing_flag
 
         return (has_questions and not has_soap) or has_missing
 
@@ -221,7 +272,7 @@ class NEJIMEvaluator:
             logger.info(f"Limiting to first {max_cases} cases")
 
         # Variants to test
-        variants = ["original", "history", "image_only", "exam_restricted"]
+        variants = ["original", "history_only", "image_only", "exam_only", "exam_restricted"]
 
         results = []
         total_evaluations = len(case_ids) * len(variants)
@@ -308,7 +359,8 @@ class NEJIMEvaluator:
             json.dump({
                 "metadata": {
                     "timestamp": datetime.now().isoformat(),
-                    "model": self.model_name,
+                    "orchestrator_model": self.model_name,
+                    "agent_model": self.agent_model,
                     "total_cases": len(case_ids),
                     "total_evaluations": len(results),
                     "variants": variants
@@ -324,7 +376,8 @@ class NEJIMEvaluator:
         with open(md_file, 'w') as f:
             f.write(f"# NEJIM Evaluation Results\n\n")
             f.write(f"**Date:** {datetime.now().isoformat()}\n")
-            f.write(f"**Model:** {self.model_name}\n")
+            f.write(f"**Orchestrator Model:** {self.model_name}\n")
+            f.write(f"**Agent Model (Clinical Reasoning):** {self.agent_model}\n")
             f.write(f"**Total Cases:** {len(case_ids)}\n")
             f.write(f"**Total Evaluations:** {len(results)}\n\n")
 
@@ -340,9 +393,10 @@ class NEJIMEvaluator:
             f.write("\n## Key Findings\n\n")
 
             original_pause_rate = metrics["original"]["pause_rate"]
+            incomplete_variants = ["history_only", "image_only", "exam_only", "exam_restricted"]
             incomplete_pause_rate = sum(
-                metrics[v]["pause_rate"] for v in ["history", "image_only", "exam_restricted"]
-            ) / 3
+                metrics[v]["pause_rate"] for v in incomplete_variants
+            ) / len(incomplete_variants)
 
             f.write(f"- **Original cases pause rate:** {original_pause_rate:.1%} (should be low)\n")
             f.write(f"- **Incomplete cases pause rate:** {incomplete_pause_rate:.1%} (should be high)\n")
@@ -382,13 +436,26 @@ async def main():
         default="gemini-pro-latest",
         help="Model for orchestration"
     )
+    parser.add_argument(
+        "--agent-model",
+        default="medgemma",
+        help="Model for clinical reasoning: medgemma, medgemma-vertex, gemini (default: medgemma)"
+    )
 
     args = parser.parse_args()
 
-    evaluator = NEJIMEvaluator(model_name=args.model)
+    # Build output dir with model name for easy comparison
+    agent_model = args.agent_model
+    output_dir = args.output
+    if output_dir == "logs/evaluation":
+        # Auto-name by agent model (e.g., logs/evaluation_medgemma-27b-it)
+        model_slug = agent_model.replace("/", "-").replace(" ", "-")
+        output_dir = f"logs/evaluation_{model_slug}"
+
+    evaluator = NEJIMEvaluator(model_name=args.model, agent_model=agent_model)
     await evaluator.evaluate_all_cases(
         nejim_dir=args.input,
-        output_dir=args.output,
+        output_dir=output_dir,
         max_cases=args.max_cases
     )
 

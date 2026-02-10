@@ -25,10 +25,10 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "medgemma": {
         "adapter": MedGemmaAdapter,
         "status": "active",
-        "description": "Google MedGemma-27B - Medical specialist model",
+        "description": "Google MedGemma-27B-IT - Medical specialist model (27B params)",
         "provider": "huggingface",
         "requires": "HUGGINGFACE_API_KEY",
-        "model_id": settings.medgemma_model_id,
+        "model_id": settings.medgemma_27b_model_id,
         "strengths": [
             "Medical knowledge",
             "Clinical reasoning",
@@ -38,6 +38,25 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "Clinical diagnosis",
             "Medical literature review",
             "Patient case analysis"
+        ]
+    },
+
+    "medgemma-4b": {
+        "adapter": MedGemmaAdapter,
+        "status": "active",
+        "description": "Google MedGemma-4B-IT - Lightweight medical model (4B params)",
+        "provider": "huggingface",
+        "requires": "HUGGINGFACE_API_KEY",
+        "model_id": settings.medgemma_4b_model_id,
+        "strengths": [
+            "Medical knowledge",
+            "Fast inference",
+            "Lower memory requirements"
+        ],
+        "use_cases": [
+            "Clinical diagnosis",
+            "Rapid medical consultation",
+            "Resource-constrained environments"
         ]
     },
 

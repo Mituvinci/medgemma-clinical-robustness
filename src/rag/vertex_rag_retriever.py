@@ -86,8 +86,9 @@ class VertexRAGRetriever:
                     rag.RagResource(rag_corpus=self.corpus_name)
                 ],
                 text=query,
-                similarity_top_k=n_results,
-                vector_distance_threshold=1.0 - min_similarity if min_similarity > 0 else None,
+                rag_retrieval_config=rag.RagRetrievalConfig(
+                    top_k=n_results
+                ),
             )
         except Exception as e:
             logger.error(f"Vertex RAG retrieval failed: {e}")

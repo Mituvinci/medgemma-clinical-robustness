@@ -119,7 +119,7 @@ def _get_medgemma_specialist():
         if _medgemma_specialist is None or not isinstance(_medgemma_specialist, GeminiAdapter):
             _medgemma_specialist = GeminiAdapter(
                 model_id=settings.gemini_model_id,
-                api_key=settings.gemini_api_key
+                api_key=settings.google_api_key
             )
         return _medgemma_specialist
 
@@ -752,7 +752,7 @@ class MedGemmaWorkflow:
 
         # Set up API key in environment for Gemini
         import os
-        os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
+        os.environ["GOOGLE_API_KEY"] = settings.google_api_key
 
         # Create root coordinator with sub-agents
         self.root_agent = create_root_coordinator(model_name)

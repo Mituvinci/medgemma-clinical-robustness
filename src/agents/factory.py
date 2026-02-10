@@ -67,7 +67,7 @@ class AgentFactory:
         if provider == "huggingface":
             key = settings.huggingface_api_key
         elif provider == "google":
-            key = settings.gemini_api_key
+            key = settings.google_api_key
         elif provider == "openai":
             key = getattr(settings, "openai_api_key", "")
         elif provider == "anthropic":

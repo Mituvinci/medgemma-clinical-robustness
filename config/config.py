@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # API Keys - Active
     huggingface_api_key: str = os.getenv("HUGGINGFACE_API_KEY", "")
-    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
     google_cloud_project: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     google_application_credentials: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
@@ -97,8 +97,8 @@ def validate_config():
     if not settings.huggingface_api_key:
         errors.append("HUGGINGFACE_API_KEY is not set")
 
-    if not settings.gemini_api_key:
-        errors.append("GEMINI_API_KEY is not set")
+    if not settings.google_api_key:
+        errors.append("GOOGLE_API_KEY is not set")
 
     if errors:
         raise ValueError(f"Configuration errors:\n" + "\n".join(f"  - {e}" for e in errors))

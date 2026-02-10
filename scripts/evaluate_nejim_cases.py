@@ -27,6 +27,7 @@ from datetime import datetime
 import re
 
 from src.agents.adk_agents import create_workflow
+from src.agents.registry import MODEL_REGISTRY
 from src.utils.schemas import ClinicalCase
 from config.config import settings
 
@@ -373,11 +374,13 @@ class NEJIMEvaluator:
 
         # Save Markdown summary
         md_file = output_path / f"nejim_summary_{timestamp}.md"
+        # Get full model ID from registry
+        agent_model_id = MODEL_REGISTRY.get(self.agent_model, {}).get("model_id", self.agent_model)
         with open(md_file, 'w') as f:
             f.write(f"# NEJIM Evaluation Results\n\n")
             f.write(f"**Date:** {datetime.now().isoformat()}\n")
             f.write(f"**Orchestrator Model:** {self.model_name}\n")
-            f.write(f"**Agent Model (Clinical Reasoning):** {self.agent_model}\n")
+            f.write(f"**Agent Model (Clinical Reasoning):** {agent_model_id}\n")
             f.write(f"**Total Cases:** {len(case_ids)}\n")
             f.write(f"**Total Evaluations:** {len(results)}\n\n")
 
@@ -448,8 +451,9 @@ async def main():
     agent_model = args.agent_model
     output_dir = args.output
     if output_dir == "logs/evaluation":
-        # Auto-name by agent model (e.g., logs/evaluation_medgemma-27b-it)
-        model_slug = agent_model.replace("/", "-").replace(" ", "-")
+        # Auto-name by actual model_id from registry (e.g., logs/evaluation_medgemma-1.5-4b-it)
+        model_id = MODEL_REGISTRY.get(agent_model, {}).get("model_id", agent_model)
+        model_slug = model_id.replace("/", "-").replace(" ", "-").replace("google/", "")
         output_dir = f"logs/evaluation_{model_slug}"
 
     evaluator = NEJIMEvaluator(model_name=args.model, agent_model=agent_model)

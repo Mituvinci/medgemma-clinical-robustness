@@ -74,6 +74,12 @@ main() {
     else
         echo "✓ Already in pytorch environment"
     fi
+
+    # Offline mode: compute nodes have no internet access.
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+    export SENTENCE_TRANSFORMERS_HOME=$HOME/.cache/huggingface/hub
+    echo "✓ Offline mode enabled (HF_HUB_OFFLINE=1)"
     echo ""
 
     echo "========================================================================"

@@ -65,7 +65,6 @@ try:
 except Exception:
     pass  # Silently continue if telemetry module not found
 
-from src.rag.retriever import Retriever
 from src.utils.schemas import (
     ClinicalCase,
     TriageResult,
@@ -86,7 +85,19 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 # Initialize retriever (shared across agents)
-_retriever = Retriever()
+# Choose between ChromaDB (local) or Vertex AI RAG (cloud) based on config
+if settings.rag_backend == "vertex" and settings.vertex_rag_corpus:
+    from src.rag.vertex_rag_retriever import VertexRAGRetriever
+    _retriever = VertexRAGRetriever(
+        project_id=settings.google_cloud_project,
+        location=settings.vertex_rag_location,
+        corpus_name=settings.vertex_rag_corpus,
+    )
+    logger.info(f"✓ Vertex AI RAG retriever initialized (corpus: {settings.vertex_rag_corpus})")
+else:
+    from src.rag.retriever import Retriever
+    _retriever = Retriever()
+    logger.info(f"✓ ChromaDB retriever initialized (collection: {settings.chroma_collection_name})")
 
 # MedGemma adapter (initialized lazily to avoid import-time errors)
 from src.agents.models.medgemma_adapter import MedGemmaAdapter

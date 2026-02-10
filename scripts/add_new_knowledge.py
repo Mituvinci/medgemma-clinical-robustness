@@ -14,6 +14,11 @@ without deleting existing data.
 import argparse
 import sys
 from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 from src.rag.ingestion import IngestionPipeline
 from src.rag.vector_store import VectorStore
 

@@ -27,8 +27,10 @@ class Settings(BaseSettings):
     # Active Model Selection
     active_model: str = os.getenv("ACTIVE_MODEL", "medgemma")  # Options: medgemma, gemini, gpt4, claude
 
-    # Model Configuration
-    medgemma_model_id: str = os.getenv("MEDGEMMA_MODEL_ID", "google/medgemma-27b-it")
+    # Model Configuration - MedGemma variants
+    medgemma_27b_model_id: str = os.getenv("MEDGEMMA_27B_MODEL_ID", "google/medgemma-27b-it")
+    medgemma_4b_model_id: str = os.getenv("MEDGEMMA_4B_MODEL_ID", "google/medgemma-4b-it")
+    medgemma_model_id: str = os.getenv("MEDGEMMA_27B_MODEL_ID", "google/medgemma-27b-it")  # backward compat
     gemini_model_id: str = os.getenv("GEMINI_MODEL_ID", "gemini-pro-latest")
     openai_model_id: str = os.getenv("OPENAI_MODEL_ID", "gpt-4-turbo")
     claude_model_id: str = os.getenv("CLAUDE_MODEL_ID", "claude-3-opus-20240229")
@@ -43,6 +45,11 @@ class Settings(BaseSettings):
     # Chunk Configuration
     chunk_size: int = int(os.getenv("CHUNK_SIZE", "512"))
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "50"))
+
+    # Vertex AI RAG Configuration
+    rag_backend: str = os.getenv("RAG_BACKEND", "chroma")  # Options: "chroma" or "vertex"
+    vertex_rag_location: str = os.getenv("VERTEX_RAG_LOCATION", "us-central1")
+    vertex_rag_corpus: str = os.getenv("VERTEX_RAG_CORPUS", "")
 
     # Logging
     log_level: str = os.getenv("LOG_LEVEL", "INFO")

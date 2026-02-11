@@ -22,8 +22,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-PROJECT_ID = "gen-lang-client-0316668095"
-LOCATION = "us-east1"  # Changed from us-central1 due to capacity restrictions
+PROJECT_ID = "gen-lang-client-0311980685"
+LOCATION = "us-west1"  # us-central1/us-east4 restricted, us-east1 had capacity issues
 GCS_BUCKET = "gs://aad_state_pearl_jaad_cr_derm_data"
 CORPUS_DISPLAY_NAME = "medgemma-derm-guidelines"
 

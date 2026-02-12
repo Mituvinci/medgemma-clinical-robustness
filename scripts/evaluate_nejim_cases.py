@@ -40,13 +40,18 @@ logger = logging.getLogger(__name__)
 
 # Orchestrator models to try in order. Each has its own daily quota (~100 requests/day).
 # When one model's quota is exhausted (429), we automatically switch to the next.
+# Ordered: Pro models first (best orchestration quality), then Flash models as fallback.
+# Each model has its own daily quota (~100 requests/day = ~25 evals).
 ORCHESTRATOR_FALLBACK_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-pro-latest",
-    "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",                     # Pro - best orchestration quality
+    "gemini-pro-latest",                  # Pro - proven to work well
+    "gemini-3-pro-preview",               # Pro - newest
+    "gemini-2.5-flash",                   # Flash - good quality
+    "gemini-3-flash-preview",             # Flash - newest
+    "gemini-2.5-flash-preview-09-2025",   # Flash - backup
+    "gemini-flash-latest",                # Flash - backup
+    "gemini-2.0-flash-001",              # Flash - backup
+    "gemini-2.0-flash",                   # Flash - lightweight (may loop)
 ]
 
 
@@ -64,17 +69,13 @@ class NEJIMEvaluator:
         self.agent_model = agent_model
         self.current_model_index = 0
 
-        # Find starting model in fallback list, or prepend it
-        if model_name in ORCHESTRATOR_FALLBACK_MODELS:
-            self.current_model_index = ORCHESTRATOR_FALLBACK_MODELS.index(model_name)
-        else:
-            ORCHESTRATOR_FALLBACK_MODELS.insert(0, model_name)
-
-        self.model_name = ORCHESTRATOR_FALLBACK_MODELS[self.current_model_index]
+        # Always start from the first model in the fallback list
+        # The --model arg is ignored; we use the ordered fallback list instead
+        self.model_name = ORCHESTRATOR_FALLBACK_MODELS[0]
         self._create_workflow(self.model_name)
 
         logger.info(f"Orchestrator model: {self.model_name}")
-        logger.info(f"Fallback models: {ORCHESTRATOR_FALLBACK_MODELS[self.current_model_index:]}")
+        logger.info(f"Fallback models ({len(ORCHESTRATOR_FALLBACK_MODELS)}): {ORCHESTRATOR_FALLBACK_MODELS}")
 
     def _create_workflow(self, model_name: str):
         """Create or recreate the workflow with a specific orchestrator model."""

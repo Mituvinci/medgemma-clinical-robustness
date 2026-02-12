@@ -188,6 +188,14 @@ def retrieve_clinical_guidelines(
         "top_similarity": guidelines[0]["similarity_score"] if guidelines else 0.0
     }
 
+    # If no guidelines found, add a clear message so the orchestrator doesn't loop
+    if len(guidelines) == 0:
+        result["message"] = (
+            "No matching guidelines found in the knowledge base for this query. "
+            "This is acceptable — proceed with clinical reasoning without guideline citations. "
+            "Do NOT retry with different queries. Move on to the next step."
+        )
+
     logger.info(f"Retrieved {len(guidelines)} guidelines (top similarity: {result['top_similarity']:.2f})")
 
     return result
@@ -569,11 +577,15 @@ Search strategy:
 - Extract key features: symptoms, location, morphology, patient demographics
 - Focus queries on: differential diagnosis, diagnostic criteria, treatment
 
+IMPORTANT: If retrieve_clinical_guidelines returns 0 results, do NOT retry with different queries.
+Instead, proceed to medgemma_guideline_synthesis with what you have (even if empty).
+The system will still provide a diagnosis based on clinical reasoning without guideline citations.
+
 Output format:
 - Search query used
-- Number of guidelines retrieved
+- Number of guidelines retrieved (may be 0 — this is acceptable)
 - MedGemma specialist's synthesis and recommendations
-- Specific citations (Source: Title)
+- Specific citations (Source: Title) if available
 - NEXT STEP: Transfer to DiagnosticAgent with research results
 """,
         tools=[

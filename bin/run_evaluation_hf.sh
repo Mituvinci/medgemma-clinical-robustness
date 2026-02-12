@@ -8,6 +8,11 @@
 #   1. MedGemma-27B-IT (Hugging Face, local GPU)
 #   2. MedGemma-4B-IT (Hugging Face, local GPU)
 #
+# IMPORTANT: Do NOT run this at the same time as run_evaluation_vertex.sh!
+#   Both scripts use Gemini Pro (Google ADK) for orchestration.
+#   Running them in parallel will exhaust the Gemini API daily quota (429 errors).
+#   Run this script AFTER run_evaluation_vertex.sh has fully completed, or vice versa.
+#
 # Usage (interactive GPU session):
 #   bash bin/run_evaluation_hf.sh
 #
@@ -92,9 +97,12 @@ echo "Started: $(date)"
 python scripts/evaluate_nejim_cases.py \
     --input NEJIM/image_challenge_input \
     --agent-model medgemma \
+    --resume \
     --output logs/evaluation_medgemma-27b-it_without_options
 echo "Finished: $(date)"
 echo ""
+echo "Waiting 60 seconds between runs to avoid Gemini API rate limits..."
+sleep 60
 
 echo "========================================================================"
 echo "  RUN 2/4: MedGemma-27B-IT + with options (MCQ)"
@@ -103,9 +111,12 @@ echo "Started: $(date)"
 python scripts/evaluate_nejim_cases.py \
     --input NEJIM/image_challenge_input_with_options \
     --agent-model medgemma \
+    --resume \
     --output logs/evaluation_medgemma-27b-it_with_options
 echo "Finished: $(date)"
 echo ""
+echo "Waiting 60 seconds between runs to avoid Gemini API rate limits..."
+sleep 60
 
 echo "========================================================================"
 echo "  RUN 3/4: MedGemma-4B-IT + without options"
@@ -114,9 +125,12 @@ echo "Started: $(date)"
 python scripts/evaluate_nejim_cases.py \
     --input NEJIM/image_challenge_input \
     --agent-model medgemma-4b \
+    --resume \
     --output logs/evaluation_medgemma-4b-it_without_options
 echo "Finished: $(date)"
 echo ""
+echo "Waiting 60 seconds between runs to avoid Gemini API rate limits..."
+sleep 60
 
 echo "========================================================================"
 echo "  RUN 4/4: MedGemma-4B-IT + with options (MCQ)"
@@ -125,6 +139,7 @@ echo "Started: $(date)"
 python scripts/evaluate_nejim_cases.py \
     --input NEJIM/image_challenge_input_with_options \
     --agent-model medgemma-4b \
+    --resume \
     --output logs/evaluation_medgemma-4b-it_with_options
 echo "Finished: $(date)"
 echo ""

@@ -7,6 +7,11 @@
 # Model:
 #   MedGemma-1.5-4B-IT (Vertex AI endpoint - no local GPU needed)
 #
+# IMPORTANT: Do NOT run this at the same time as run_evaluation_hf.sh!
+#   Both scripts use Gemini Pro (Google ADK) for orchestration.
+#   Running them in parallel will exhaust the Gemini API daily quota (429 errors).
+#   Run this script AFTER run_evaluation_hf.sh has fully completed, or vice versa.
+#
 # PREREQUISITE: Deploy MedGemma-1.5-4B-IT on Vertex AI and update:
 #   1. endpoint_id in src/agents/registry.py (line ~93)
 #   2. region in src/agents/registry.py (line ~92) if different from us-central1
@@ -78,9 +83,12 @@ echo "Started: $(date)"
 python scripts/evaluate_nejim_cases.py \
     --input NEJIM/image_challenge_input \
     --agent-model medgemma-vertex \
+    --resume \
     --output logs/evaluation_medgemma-1.5-4b-it_without_options
 echo "Finished: $(date)"
 echo ""
+echo "Waiting 60 seconds between runs to avoid Gemini API rate limits..."
+sleep 60
 
 echo "========================================================================"
 echo "  RUN 2/2: MedGemma-1.5-4B-IT (Vertex AI) + with options (MCQ)"
@@ -89,6 +97,7 @@ echo "Started: $(date)"
 python scripts/evaluate_nejim_cases.py \
     --input NEJIM/image_challenge_input_with_options \
     --agent-model medgemma-vertex \
+    --resume \
     --output logs/evaluation_medgemma-1.5-4b-it_with_options
 echo "Finished: $(date)"
 echo ""

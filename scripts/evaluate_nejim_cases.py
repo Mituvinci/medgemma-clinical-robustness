@@ -22,6 +22,7 @@ sys.path.insert(0, str(project_root))
 import asyncio
 import json
 import logging
+import time
 from typing import Dict, Any, List
 from datetime import datetime
 import re
@@ -37,29 +38,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Orchestrator models to try in order. Each has its own daily quota (~100 requests/day).
+# When one model's quota is exhausted (429), we automatically switch to the next.
+ORCHESTRATOR_FALLBACK_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-pro-latest",
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
+]
+
 
 class NEJIMEvaluator:
     """Evaluator for NEJIM Image Challenge cases."""
 
-    def __init__(self, model_name: str = "gemini-pro-latest", agent_model: str = "medgemma"):
+    def __init__(self, model_name: str = "gemini-2.0-flash", agent_model: str = "medgemma"):
         """
         Initialize evaluator.
 
         Args:
-            model_name: Gemini model for ADK orchestration
-            agent_model: Model for clinical reasoning ("medgemma", "medgemma-vertex", "gemini")
+            model_name: Starting Gemini model for ADK orchestration
+            agent_model: Model for clinical reasoning ("medgemma", "medgemma-4b", "medgemma-vertex", "gemini")
         """
+        self.agent_model = agent_model
+        self.current_model_index = 0
+
+        # Find starting model in fallback list, or prepend it
+        if model_name in ORCHESTRATOR_FALLBACK_MODELS:
+            self.current_model_index = ORCHESTRATOR_FALLBACK_MODELS.index(model_name)
+        else:
+            ORCHESTRATOR_FALLBACK_MODELS.insert(0, model_name)
+
+        self.model_name = ORCHESTRATOR_FALLBACK_MODELS[self.current_model_index]
+        self._create_workflow(self.model_name)
+
+        logger.info(f"Orchestrator model: {self.model_name}")
+        logger.info(f"Fallback models: {ORCHESTRATOR_FALLBACK_MODELS[self.current_model_index:]}")
+
+    def _create_workflow(self, model_name: str):
+        """Create or recreate the workflow with a specific orchestrator model."""
         self.workflow = create_workflow(
             model_name=model_name,
             use_medgemma=True
         )
-        # Override agent model choice if specified
-        if agent_model != "medgemma":
-            self.workflow.agent_model = agent_model
+        if self.agent_model != "medgemma":
+            self.workflow.agent_model = self.agent_model
             import src.agents.adk_agents as adk_mod
-            adk_mod._agent_model_choice = agent_model
+            adk_mod._agent_model_choice = self.agent_model
         self.model_name = model_name
-        self.agent_model = agent_model
+
+    def _switch_to_next_model(self) -> bool:
+        """Switch to next fallback orchestrator model. Returns False if no more models."""
+        self.current_model_index += 1
+        if self.current_model_index >= len(ORCHESTRATOR_FALLBACK_MODELS):
+            logger.error("All orchestrator models exhausted! No more fallback models available.")
+            return False
+
+        next_model = ORCHESTRATOR_FALLBACK_MODELS[self.current_model_index]
+        logger.warning(f"Switching orchestrator: {self.model_name} → {next_model}")
+        self._create_workflow(next_model)
+        return True
 
     def find_nejim_cases(self, nejim_dir: str) -> List[str]:
         """Find all case IDs in NEJIM directory."""
@@ -136,66 +175,109 @@ class NEJIMEvaluator:
 
     async def evaluate_case_variant(
         self,
-        case_data: Dict[str, Any]
+        case_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Evaluate a single case variant.
+        Evaluate a single case variant with dynamic model fallback on 429 errors.
+
+        If the current orchestrator model hits a daily quota limit (429),
+        automatically switches to the next model in ORCHESTRATOR_FALLBACK_MODELS
+        and retries. Each model has its own separate daily quota.
 
         Returns result with:
         - response_text
         - agentic_pause_triggered
         - execution_time_ms
+        - orchestrator_model (which model was used)
         - error (if any)
         """
         case_id = case_data["case_id"]
         variant = case_data["variant"]
 
-        logger.info(f"Evaluating {case_id}")
+        logger.info(f"Evaluating {case_id} (orchestrator: {self.model_name})")
 
-        try:
-            # Build ClinicalCase
-            clinical_case = ClinicalCase(
-                case_id=case_id,
-                history=case_data["text"],  # Use the text content as history
-                physical_exam=None,
-                image_data=None,  # TODO: Load actual image if needed
-                context_state=variant
-            )
+        # Build ClinicalCase once (reused across retries)
+        clinical_case = ClinicalCase(
+            case_id=case_id,
+            history=case_data["text"],
+            physical_exam=None,
+            image_data=None,
+            context_state=variant
+        )
 
-            # Run workflow
-            start_time = datetime.now()
-            result = await self.workflow.run_async(clinical_case)
-            end_time = datetime.now()
-            execution_time_ms = (end_time - start_time).total_seconds() * 1000
+        # Try current model, then fallback models on 429
+        while True:
+            try:
+                start_time = datetime.now()
+                result = await self.workflow.run_async(clinical_case)
+                end_time = datetime.now()
+                execution_time_ms = (end_time - start_time).total_seconds() * 1000
 
-            response_text = result.get("response", "")
+                response_text = result.get("response", "")
 
-            # Detect agentic pause
-            agentic_pause = self._detect_pause(response_text)
+                # Check if the response itself contains a 429 error
+                if "429" in response_text and "RESOURCE_EXHAUSTED" in response_text:
+                    raise Exception(f"429 RESOURCE_EXHAUSTED in response")
 
-            return {
-                "case_id": case_id,
-                "variant": variant,
-                "original_case_id": case_data["original_case_id"],
-                "response_text": response_text,
-                "agentic_pause_triggered": agentic_pause,
-                "execution_time_ms": execution_time_ms,
-                "error": None,
-                "timestamp": datetime.now().isoformat()
-            }
+                # Detect agentic pause
+                agentic_pause = self._detect_pause(response_text)
 
-        except Exception as e:
-            logger.error(f"Error evaluating {case_id}: {e}")
-            return {
-                "case_id": case_id,
-                "variant": variant,
-                "original_case_id": case_data["original_case_id"],
-                "response_text": "",
-                "agentic_pause_triggered": False,
-                "execution_time_ms": 0.0,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat()
-            }
+                return {
+                    "case_id": case_id,
+                    "variant": variant,
+                    "original_case_id": case_data["original_case_id"],
+                    "response_text": response_text,
+                    "agentic_pause_triggered": agentic_pause,
+                    "execution_time_ms": execution_time_ms,
+                    "orchestrator_model": self.model_name,
+                    "error": None,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+            except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = any(kw in error_str for kw in [
+                    "429", "resource_exhausted", "rate limit",
+                    "quota", "too many requests"
+                ])
+
+                if is_rate_limit:
+                    logger.warning(
+                        f"  Quota exhausted for orchestrator '{self.model_name}' on {case_id}"
+                    )
+                    # Try switching to next model
+                    if self._switch_to_next_model():
+                        logger.info(f"  Retrying {case_id} with new orchestrator: {self.model_name}")
+                        time.sleep(5)  # Brief pause before trying new model
+                        continue
+                    else:
+                        # All models exhausted
+                        logger.error(f"  All orchestrator models exhausted on {case_id}")
+                        return {
+                            "case_id": case_id,
+                            "variant": variant,
+                            "original_case_id": case_data["original_case_id"],
+                            "response_text": "",
+                            "agentic_pause_triggered": False,
+                            "execution_time_ms": 0.0,
+                            "orchestrator_model": self.model_name,
+                            "error": f"All orchestrator models exhausted: {str(e)}",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                else:
+                    # Non-rate-limit error — don't retry
+                    logger.error(f"Error evaluating {case_id}: {e}")
+                    return {
+                        "case_id": case_id,
+                        "variant": variant,
+                        "original_case_id": case_data["original_case_id"],
+                        "response_text": "",
+                        "agentic_pause_triggered": False,
+                        "execution_time_ms": 0.0,
+                        "orchestrator_model": self.model_name,
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+        }
 
     def _detect_pause(self, response: str) -> bool:
         """Detect if agent paused for missing data."""
@@ -251,40 +333,93 @@ class NEJIMEvaluator:
 
         return (has_questions and not has_soap) or has_missing
 
+    def _load_previous_results(self, output_dir: str) -> Dict[str, Dict]:
+        """Load previously completed results from partial file for resuming."""
+        partial_file = Path(output_dir) / "evaluation_partial.json"
+        if not partial_file.exists():
+            return {}
+
+        try:
+            with open(partial_file) as f:
+                data = json.load(f)
+            results = data.get("results", [])
+
+            # Index by case_id (e.g., "NEJIM_01_02_25_original") -> result
+            completed = {}
+            for r in results:
+                if r.get("error") is None:
+                    completed[r["case_id"]] = r
+
+            logger.info(f"Loaded {len(completed)} previously completed evaluations from {partial_file}")
+            return completed
+        except Exception as e:
+            logger.warning(f"Could not load previous results: {e}")
+            return {}
+
     async def evaluate_all_cases(
         self,
         nejim_dir: str,
         output_dir: str = "logs/evaluation",
-        max_cases: int = None
+        max_cases: int = None,
+        skip_cases: int = 0,
+        resume: bool = False
     ):
         """
-        Evaluate all NEJIM cases across 4 context states.
+        Evaluate all NEJIM cases across 5 context states.
 
         Args:
             nejim_dir: Path to NEJIM folder
             output_dir: Where to save results
             max_cases: Limit to first N cases (for testing)
+            skip_cases: Skip first N cases (for resuming after quota hit)
+            resume: If True, skip cases that already passed in previous partial results
         """
         # Find all cases
         case_ids = self.find_nejim_cases(nejim_dir)
 
+        if skip_cases > 0:
+            logger.info(f"Skipping first {skip_cases} cases")
+            case_ids = case_ids[skip_cases:]
+
         if max_cases:
             case_ids = case_ids[:max_cases]
-            logger.info(f"Limiting to first {max_cases} cases")
+            logger.info(f"Limiting to {max_cases} cases")
+
+        # Load previous results if resuming
+        previously_completed = {}
+        if resume:
+            previously_completed = self._load_previous_results(output_dir)
 
         # Variants to test
         variants = ["original", "history_only", "image_only", "exam_only", "exam_restricted"]
 
         results = []
+        # Pre-load previously passed results so final output is complete
+        if resume and previously_completed:
+            results = list(previously_completed.values())
+            logger.info(f"Starting with {len(results)} previously completed results")
+
         total_evaluations = len(case_ids) * len(variants)
+        skipped_count = 0
 
         logger.info(f"Starting evaluation: {len(case_ids)} cases × {len(variants)} variants = {total_evaluations} evaluations")
-        logger.info("This will take approximately 1-2 hours. NO USER INTERACTION NEEDED.")
+        if resume:
+            logger.info("Resume mode ON — skipping previously completed evaluations")
 
         eval_num = 0
         for case_id in case_ids:
             for variant in variants:
                 eval_num += 1
+
+                # Build the full case_id to check
+                full_case_id = f"NEJIM_{case_id}_{variant}"
+
+                # Skip if already completed in previous run
+                if resume and full_case_id in previously_completed:
+                    skipped_count += 1
+                    logger.info(f"[{eval_num}/{total_evaluations}] {full_case_id} — SKIPPED (already passed)")
+                    continue
+
                 logger.info(f"\n[{eval_num}/{total_evaluations}] Case {case_id} - {variant}")
 
                 # Load case variant
@@ -300,12 +435,16 @@ class NEJIMEvaluator:
                 else:
                     logger.info(f"  → Diagnosis provided")
 
-                # Save partial results every 10 cases
-                if eval_num % 10 == 0:
+                # Save partial results every 5 evaluations
+                if (eval_num - skipped_count) % 5 == 0:
                     self._save_partial_results(results, output_dir)
 
-        # Save final results
-        self._save_results(results, output_dir, case_ids, variants)
+        if skipped_count > 0:
+            logger.info(f"\nSkipped {skipped_count} previously completed evaluations")
+
+        # Save final results — use all case_ids for complete report
+        all_case_ids = self.find_nejim_cases(nejim_dir)
+        self._save_results(results, output_dir, all_case_ids, variants)
 
         logger.info(f"\nEvaluation complete! Results saved to {output_dir}")
         return results
@@ -435,14 +574,25 @@ async def main():
         help="Limit to first N cases (for testing)"
     )
     parser.add_argument(
+        "--skip-cases",
+        type=int,
+        default=0,
+        help="Skip first N cases (for resuming after quota hit)"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from previous run: skip cases that already passed in partial results"
+    )
+    parser.add_argument(
         "--model",
-        default="gemini-pro-latest",
-        help="Model for orchestration"
+        default="gemini-2.0-flash",
+        help="Model for orchestration (default: gemini-2.0-flash)"
     )
     parser.add_argument(
         "--agent-model",
         default="medgemma",
-        help="Model for clinical reasoning: medgemma, medgemma-vertex, gemini (default: medgemma)"
+        help="Model for clinical reasoning: medgemma, medgemma-4b, medgemma-vertex, gemini (default: medgemma)"
     )
 
     args = parser.parse_args()
@@ -460,7 +610,9 @@ async def main():
     await evaluator.evaluate_all_cases(
         nejim_dir=args.input,
         output_dir=output_dir,
-        max_cases=args.max_cases
+        max_cases=args.max_cases,
+        skip_cases=args.skip_cases,
+        resume=args.resume
     )
 
 

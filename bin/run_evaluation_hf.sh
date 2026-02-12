@@ -20,9 +20,9 @@
 #   sbatch bin/run_evaluation_hf.sh
 #
 #SBATCH --partition=gpu_2day
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:nvidia_a40:2
 #SBATCH --mem=64G
-#SBATCH --time=72:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/evaluation_hf_job_%j.log
 #SBATCH --job-name=medgemma_eval_hf
 

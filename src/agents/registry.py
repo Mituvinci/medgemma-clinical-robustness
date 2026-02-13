@@ -103,6 +103,57 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         ]
     },
 
+    "medgemma-27b-it-vertex": {
+        "adapter": VertexMedGemmaAdapter,
+        "status": "active",
+        "description": "MedGemma-27B-IT via Vertex AI endpoint (multimodal: image+text)",
+        "provider": "vertex_ai",
+        "requires": "GOOGLE_APPLICATION_CREDENTIALS",
+        "model_id": "google/medgemma-27b-it",
+        "project_id": settings.google_cloud_project,
+        "region": "us-central1",
+        "endpoint_id": "mg-endpoint-ad04065b-f856-4277-85bd-7d5eea91d9e7",
+        "strengths": [
+            "Medical knowledge (27B params)",
+            "Advanced clinical reasoning",
+            "Multimodal (image+text)",
+            "Cloud-hosted (no local GPU needed)",
+            "Best accuracy among MedGemma variants"
+        ],
+        "use_cases": [
+            "Complex clinical diagnosis",
+            "Primary evaluation model",
+            "Production medical reasoning",
+            "Dermatology image analysis"
+        ]
+    },
+
+    "medgemma-4b-it-vertex": {
+        "adapter": VertexMedGemmaAdapter,
+        "status": "stub",
+        "description": "MedGemma-4B-IT via Vertex AI endpoint (multimodal: image+text) - TO BE DEPLOYED",
+        "provider": "vertex_ai",
+        "requires": "GOOGLE_APPLICATION_CREDENTIALS",
+        "model_id": "google/medgemma-4b-it",
+        "project_id": settings.google_cloud_project,
+        "region": "us-central1",
+        "endpoint_id": "PLACEHOLDER_ENDPOINT_ID",
+        "message": "Endpoint will be deployed tomorrow (2026-02-13)",
+        "strengths": [
+            "Medical knowledge (4B params)",
+            "Fast inference",
+            "Multimodal (image+text)",
+            "Cloud-hosted (no local GPU needed)",
+            "Resource-efficient"
+        ],
+        "use_cases": [
+            "Clinical diagnosis",
+            "Rapid evaluation",
+            "Lightweight medical reasoning",
+            "Dermatology image analysis"
+        ]
+    },
+
     # ====== STUB MODELS (API keys not yet provided) ======
 
     "gpt4": {

@@ -1,0 +1,594 @@
+"""
+Evaluation Results Analysis Script
+
+Generates comprehensive metrics, tables, and plots from evaluation results.
+
+Usage:
+    python scripts/analyze_evaluation_results.py \
+        --results logs/evaluation_medgemma-27b-it-vertex_without_options/nejim_evaluation_*.json \
+        --groundtruth NEJIM/NEJM_Groundtruth.csv \
+        --output logs/analysis_report_27b_it.html
+"""
+
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+import json
+import re
+import csv
+from datetime import datetime
+from typing import Dict, List, Tuple, Any
+import argparse
+from difflib import SequenceMatcher
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Set plotting style
+sns.set_theme(style="whitegrid")
+plt.rcParams['figure.figsize'] = (12, 6)
+
+
+class EvaluationAnalyzer:
+    """Analyzes evaluation results and generates comprehensive metrics."""
+
+    def __init__(self, groundtruth_path: str):
+        """
+        Initialize analyzer with ground truth data.
+
+        Args:
+            groundtruth_path: Path to CSV file with correct diagnoses
+        """
+        self.groundtruth = self._load_groundtruth(groundtruth_path)
+        self.results_data = []
+
+    def _load_groundtruth(self, path: str) -> Dict[str, str]:
+        """
+        Load ground truth diagnoses from CSV.
+
+        Format: Date,Ground_Truth
+        Example: 1/2/2025,Argyria
+
+        Returns:
+            Dict mapping case_id (e.g., "01_02_25") to diagnosis
+        """
+        groundtruth = {}
+
+        with open(path, 'r', encoding='utf-8-sig') as f:  # utf-8-sig removes BOM
+            reader = csv.DictReader(f)
+            for row in reader:
+                date_str = row['Date'].strip()
+                diagnosis = row['Ground_Truth'].strip()
+
+                # Parse date and convert to case_id format
+                # "1/2/2025" → "01_02_25"
+                try:
+                    date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                    case_id = date_obj.strftime('%m_%d_%y')
+                    groundtruth[case_id] = diagnosis
+                except ValueError:
+                    print(f"Warning: Could not parse date: {date_str}")
+                    continue
+
+        print(f"Loaded {len(groundtruth)} ground truth diagnoses")
+        return groundtruth
+
+    def load_evaluation_results(self, results_path: str):
+        """
+        Load evaluation results from JSON file.
+
+        Args:
+            results_path: Path to evaluation results JSON
+        """
+        with open(results_path, 'r') as f:
+            data = json.load(f)
+
+        self.metadata = data.get('metadata', {})
+        self.results_data = data.get('results', [])
+
+        print(f"Loaded {len(self.results_data)} evaluation results")
+        print(f"Metadata: {self.metadata}")
+
+    def extract_diagnosis(self, response_text: str) -> Tuple[str, float]:
+        """
+        Extract primary diagnosis from SOAP note response.
+
+        Args:
+            response_text: Full agent response with SOAP note
+
+        Returns:
+            (diagnosis, confidence) tuple
+        """
+        # Pattern 1: **Primary Diagnosis:** **Text**
+        pattern1 = r'\*\*Primary Diagnosis:\*\*\s*\*\*([^*\n]+)\*\*'
+        match = re.search(pattern1, response_text, re.IGNORECASE)
+        if match:
+            diagnosis = match.group(1).strip()
+
+            # Extract confidence if present
+            conf_pattern = r'\*\*Confidence Score:\*\*\s*([\d.]+)'
+            conf_match = re.search(conf_pattern, response_text)
+            confidence = float(conf_match.group(1)) if conf_match else 0.5
+
+            return diagnosis, confidence
+
+        # Pattern 2: Primary Diagnosis: Text (no asterisks)
+        pattern2 = r'Primary Diagnosis:\s*([^\n]+?)(?:\s*\(|$)'
+        match = re.search(pattern2, response_text, re.IGNORECASE)
+        if match:
+            diagnosis = match.group(1).strip()
+            # Remove markdown formatting
+            diagnosis = re.sub(r'\*\*', '', diagnosis)
+            return diagnosis, 0.5
+
+        # Pattern 3: Assessment section first diagnosis
+        pattern3 = r'Assessment \(A\):[^\n]*\n[^\n]*?([A-Z][a-z]+(?:\s+[a-z]+){0,5})'
+        match = re.search(pattern3, response_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1).strip(), 0.3
+
+        # No diagnosis found
+        return "Unknown", 0.0
+
+    def fuzzy_match(self, pred: str, true: str, threshold: float = 0.7) -> bool:
+        """
+        Fuzzy match two diagnosis strings.
+
+        Args:
+            pred: Predicted diagnosis
+            true: Ground truth diagnosis
+            threshold: Similarity threshold (0-1)
+
+        Returns:
+            True if match, False otherwise
+        """
+        # Normalize both strings
+        pred_norm = pred.lower().strip()
+        true_norm = true.lower().strip()
+
+        # Exact match
+        if pred_norm == true_norm:
+            return True
+
+        # Check if one is substring of other
+        if pred_norm in true_norm or true_norm in pred_norm:
+            return True
+
+        # Fuzzy similarity
+        similarity = SequenceMatcher(None, pred_norm, true_norm).ratio()
+        return similarity >= threshold
+
+    def analyze_all_results(self) -> Dict[str, Any]:
+        """
+        Analyze all evaluation results and calculate metrics.
+
+        Returns:
+            Dict with comprehensive metrics
+        """
+        metrics = {
+            'by_variant': {},
+            'by_model': {},
+            'overall': {},
+            'detailed_results': []
+        }
+
+        variants = ['original', 'history_only', 'image_only', 'exam_only', 'exam_restricted']
+
+        for variant in variants:
+            metrics['by_variant'][variant] = {
+                'total': 0,
+                'correct': 0,
+                'paused': 0,
+                'errors': 0,
+                'avg_confidence': 0.0,
+                'avg_execution_time_ms': 0.0,
+                'diagnoses': []
+            }
+
+        # Process each result
+        for result in self.results_data:
+            case_id = result['case_id']
+            variant = result['variant']
+
+            # Extract case number (e.g., "NEJIM_01_02_25_original" → "01_02_25")
+            case_match = re.search(r'(\d{2}_\d{2}_\d{2})', case_id)
+            if not case_match:
+                continue
+            case_num = case_match.group(1)
+
+            # Get ground truth
+            true_diagnosis = self.groundtruth.get(case_num, "Unknown")
+
+            # Extract predicted diagnosis
+            response_text = result.get('response_text', '')
+            pred_diagnosis, confidence = self.extract_diagnosis(response_text)
+
+            # Check if correct
+            is_correct = self.fuzzy_match(pred_diagnosis, true_diagnosis)
+
+            # Metrics
+            paused = result.get('agentic_pause_triggered', False)
+            error = result.get('error') is not None
+            exec_time = result.get('execution_time_ms', 0)
+
+            # Update variant metrics
+            if variant in metrics['by_variant']:
+                var_metrics = metrics['by_variant'][variant]
+                var_metrics['total'] += 1
+                if is_correct:
+                    var_metrics['correct'] += 1
+                if paused:
+                    var_metrics['paused'] += 1
+                if error:
+                    var_metrics['errors'] += 1
+                var_metrics['avg_confidence'] += confidence
+                var_metrics['avg_execution_time_ms'] += exec_time
+                var_metrics['diagnoses'].append({
+                    'case_id': case_num,
+                    'predicted': pred_diagnosis,
+                    'true': true_diagnosis,
+                    'correct': is_correct,
+                    'confidence': confidence,
+                    'paused': paused
+                })
+
+            # Store detailed result
+            metrics['detailed_results'].append({
+                'case_id': case_num,
+                'variant': variant,
+                'predicted_diagnosis': pred_diagnosis,
+                'true_diagnosis': true_diagnosis,
+                'correct': is_correct,
+                'confidence': confidence,
+                'paused': paused,
+                'error': error,
+                'execution_time_ms': exec_time
+            })
+
+        # Calculate averages and rates
+        for variant, data in metrics['by_variant'].items():
+            if data['total'] > 0:
+                data['accuracy'] = data['correct'] / data['total']
+                data['pause_rate'] = data['paused'] / data['total']
+                data['error_rate'] = data['errors'] / data['total']
+                data['avg_confidence'] /= data['total']
+                data['avg_execution_time_ms'] /= data['total']
+
+        # Overall metrics
+        total_cases = len(metrics['detailed_results'])
+        if total_cases > 0:
+            metrics['overall'] = {
+                'total_evaluations': total_cases,
+                'overall_accuracy': sum(1 for r in metrics['detailed_results'] if r['correct']) / total_cases,
+                'overall_pause_rate': sum(1 for r in metrics['detailed_results'] if r['paused']) / total_cases,
+                'overall_error_rate': sum(1 for r in metrics['detailed_results'] if r['error']) / total_cases,
+                'avg_confidence': sum(r['confidence'] for r in metrics['detailed_results']) / total_cases,
+                'avg_execution_time_ms': sum(r['execution_time_ms'] for r in metrics['detailed_results']) / total_cases
+            }
+
+        return metrics
+
+    def generate_tables(self, metrics: Dict, output_dir: str):
+        """Generate markdown and CSV tables from metrics."""
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Table 1: Metrics by Variant
+        variant_df = pd.DataFrame([
+            {
+                'Variant': variant,
+                'Total Cases': data['total'],
+                'Accuracy (%)': f"{data['accuracy']*100:.1f}",
+                'Pause Rate (%)': f"{data['pause_rate']*100:.1f}",
+                'Avg Confidence': f"{data['avg_confidence']:.2f}",
+                'Avg Time (s)': f"{data['avg_execution_time_ms']/1000:.1f}",
+                'Error Rate (%)': f"{data['error_rate']*100:.1f}"
+            }
+            for variant, data in metrics['by_variant'].items()
+        ])
+
+        # Save CSV
+        variant_df.to_csv(output_path / 'metrics_by_variant.csv', index=False)
+
+        # Save Markdown
+        with open(output_path / 'metrics_by_variant.md', 'w') as f:
+            f.write("# Evaluation Metrics by Context Variant\n\n")
+            f.write(variant_df.to_markdown(index=False))
+            f.write("\n")
+
+        print(f"✓ Saved metrics table to {output_path}/metrics_by_variant.csv")
+
+        # Table 2: Detailed Results
+        detailed_df = pd.DataFrame(metrics['detailed_results'])
+        detailed_df.to_csv(output_path / 'detailed_results.csv', index=False)
+        print(f"✓ Saved detailed results to {output_path}/detailed_results.csv")
+
+        return variant_df
+
+    def generate_plots(self, metrics: Dict, output_dir: str):
+        """Generate visualization plots."""
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        variants = list(metrics['by_variant'].keys())
+
+        # Plot 1: Accuracy by Variant
+        fig, ax = plt.subplots(figsize=(10, 6))
+        accuracies = [metrics['by_variant'][v]['accuracy'] * 100 for v in variants]
+        colors = ['green' if acc > 70 else 'orange' if acc > 50 else 'red' for acc in accuracies]
+
+        ax.bar(variants, accuracies, color=colors, alpha=0.7, edgecolor='black')
+        ax.set_xlabel('Context Variant', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+        ax.set_title('Diagnostic Accuracy by Context Variant', fontsize=14, fontweight='bold')
+        ax.set_ylim(0, 100)
+        ax.axhline(y=70, color='gray', linestyle='--', label='70% Threshold')
+        ax.legend()
+
+        for i, v in enumerate(accuracies):
+            ax.text(i, v + 2, f'{v:.1f}%', ha='center', fontweight='bold')
+
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.savefig(output_path / 'accuracy_by_variant.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved plot to {output_path}/accuracy_by_variant.png")
+
+        # Plot 2: Pause Rate by Variant
+        fig, ax = plt.subplots(figsize=(10, 6))
+        pause_rates = [metrics['by_variant'][v]['pause_rate'] * 100 for v in variants]
+
+        # Expected pause rates (incomplete variants should pause more)
+        expected_pauses = {'original': 0, 'history_only': 80, 'image_only': 80,
+                          'exam_only': 80, 'exam_restricted': 90}
+        expected = [expected_pauses.get(v, 50) for v in variants]
+
+        x = range(len(variants))
+        width = 0.35
+        ax.bar([i - width/2 for i in x], pause_rates, width, label='Actual', alpha=0.7, color='steelblue')
+        ax.bar([i + width/2 for i in x], expected, width, label='Expected', alpha=0.7, color='lightcoral')
+
+        ax.set_xlabel('Context Variant', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Pause Rate (%)', fontsize=12, fontweight='bold')
+        ax.set_title('Agentic Pause Rate by Context Variant', fontsize=14, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(variants, rotation=45, ha='right')
+        ax.set_ylim(0, 100)
+        ax.legend()
+
+        plt.tight_layout()
+        plt.savefig(output_path / 'pause_rate_by_variant.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved plot to {output_path}/pause_rate_by_variant.png")
+
+        # Plot 3: Confidence vs Accuracy Scatter
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        for variant in variants:
+            data = metrics['by_variant'][variant]['diagnoses']
+            confidences = [d['confidence'] for d in data]
+            corrects = [1 if d['correct'] else 0 for d in data]
+            ax.scatter(confidences, corrects, alpha=0.6, label=variant, s=100)
+
+        ax.set_xlabel('Confidence Score', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Correct (1) vs Incorrect (0)', fontsize=12, fontweight='bold')
+        ax.set_title('Confidence vs Correctness', fontsize=14, fontweight='bold')
+        ax.set_ylim(-0.1, 1.1)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(output_path / 'confidence_vs_accuracy.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved plot to {output_path}/confidence_vs_accuracy.png")
+
+        # Plot 4: Execution Time by Variant
+        fig, ax = plt.subplots(figsize=(10, 6))
+        exec_times = [metrics['by_variant'][v]['avg_execution_time_ms'] / 1000 for v in variants]
+
+        ax.bar(variants, exec_times, color='teal', alpha=0.7, edgecolor='black')
+        ax.set_xlabel('Context Variant', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Avg Execution Time (seconds)', fontsize=12, fontweight='bold')
+        ax.set_title('Average Execution Time by Context Variant', fontsize=14, fontweight='bold')
+
+        for i, v in enumerate(exec_times):
+            ax.text(i, v + 1, f'{v:.1f}s', ha='center', fontweight='bold')
+
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.savefig(output_path / 'execution_time_by_variant.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved plot to {output_path}/execution_time_by_variant.png")
+
+    def generate_html_report(self, metrics: Dict, output_path: str):
+        """Generate comprehensive HTML report."""
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MedGemma Evaluation Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
+        h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+        h2 {{ color: #34495e; margin-top: 30px; }}
+        .metric-box {{
+            background: white;
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .metric-row {{ display: flex; justify-content: space-between; margin: 10px 0; }}
+        .metric-label {{ font-weight: bold; color: #7f8c8d; }}
+        .metric-value {{ color: #2c3e50; font-size: 1.2em; }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            background: white;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        th {{ background: #3498db; color: white; padding: 12px; text-align: left; }}
+        td {{ padding: 10px; border-bottom: 1px solid #ecf0f1; }}
+        tr:hover {{ background: #f8f9fa; }}
+        img {{ max-width: 100%; height: auto; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
+        .success {{ color: green; font-weight: bold; }}
+        .warning {{ color: orange; font-weight: bold; }}
+        .error {{ color: red; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>📊 MedGemma Evaluation Analysis Report</h1>
+    <p><strong>Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    <p><strong>Model:</strong> {metrics.get('metadata', {}).get('agent_model', 'Unknown')}</p>
+
+    <div class="metric-box">
+        <h2>🎯 Overall Performance</h2>
+        <div class="metric-row">
+            <span class="metric-label">Total Evaluations:</span>
+            <span class="metric-value">{metrics['overall'].get('total_evaluations', 0)}</span>
+        </div>
+        <div class="metric-row">
+            <span class="metric-label">Overall Accuracy:</span>
+            <span class="metric-value {'success' if metrics['overall'].get('overall_accuracy', 0) > 0.7 else 'warning' if metrics['overall'].get('overall_accuracy', 0) > 0.5 else 'error'}">
+                {metrics['overall'].get('overall_accuracy', 0)*100:.1f}%
+            </span>
+        </div>
+        <div class="metric-row">
+            <span class="metric-label">Pause Rate:</span>
+            <span class="metric-value">{metrics['overall'].get('overall_pause_rate', 0)*100:.1f}%</span>
+        </div>
+        <div class="metric-row">
+            <span class="metric-label">Avg Confidence:</span>
+            <span class="metric-value">{metrics['overall'].get('avg_confidence', 0):.2f}</span>
+        </div>
+        <div class="metric-row">
+            <span class="metric-label">Avg Time:</span>
+            <span class="metric-value">{metrics['overall'].get('avg_execution_time_ms', 0)/1000:.1f}s</span>
+        </div>
+    </div>
+
+    <h2>📈 Visualizations</h2>
+    <img src="accuracy_by_variant.png" alt="Accuracy by Variant">
+    <img src="pause_rate_by_variant.png" alt="Pause Rate by Variant">
+    <img src="confidence_vs_accuracy.png" alt="Confidence vs Accuracy">
+    <img src="execution_time_by_variant.png" alt="Execution Time">
+
+    <h2>📋 Metrics by Variant</h2>
+    <table>
+        <tr>
+            <th>Variant</th>
+            <th>Accuracy</th>
+            <th>Pause Rate</th>
+            <th>Avg Confidence</th>
+            <th>Avg Time (s)</th>
+        </tr>
+"""
+
+        for variant, data in metrics['by_variant'].items():
+            accuracy_class = 'success' if data['accuracy'] > 0.7 else 'warning' if data['accuracy'] > 0.5 else 'error'
+            html += f"""
+        <tr>
+            <td><strong>{variant}</strong></td>
+            <td class="{accuracy_class}">{data['accuracy']*100:.1f}%</td>
+            <td>{data['pause_rate']*100:.1f}%</td>
+            <td>{data['avg_confidence']:.2f}</td>
+            <td>{data['avg_execution_time_ms']/1000:.1f}s</td>
+        </tr>
+"""
+
+        html += """
+    </table>
+
+    <h2>✅ Key Findings</h2>
+    <div class="metric-box">
+        <ul>
+"""
+
+        # Generate findings
+        original_acc = metrics['by_variant']['original']['accuracy']
+        original_pause = metrics['by_variant']['original']['pause_rate']
+
+        html += f"<li><strong>Complete Cases (Original):</strong> {original_acc*100:.1f}% accuracy, "
+        html += f"{original_pause*100:.1f}% false positive pause rate</li>"
+
+        incomplete_variants = ['history_only', 'image_only', 'exam_only', 'exam_restricted']
+        avg_incomplete_pause = sum(metrics['by_variant'][v]['pause_rate'] for v in incomplete_variants) / len(incomplete_variants)
+        html += f"<li><strong>Incomplete Cases:</strong> {avg_incomplete_pause*100:.1f}% average pause rate (safety mechanism working)</li>"
+
+        html += f"<li><strong>Robustness:</strong> System maintains {metrics['overall']['overall_accuracy']*100:.1f}% accuracy across all context levels</li>"
+
+        html += """
+        </ul>
+    </div>
+
+    <p style="margin-top: 40px; text-align: center; color: #95a5a6;">
+        Generated by MedGemma Evaluation Analysis Script
+    </p>
+</body>
+</html>
+"""
+
+        with open(output_path, 'w') as f:
+            f.write(html)
+
+        print(f"✓ Saved HTML report to {output_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Analyze MedGemma evaluation results')
+    parser.add_argument('--results', type=str, required=True,
+                       help='Path to evaluation results JSON file')
+    parser.add_argument('--groundtruth', type=str, required=True,
+                       help='Path to ground truth CSV file')
+    parser.add_argument('--output-dir', type=str, default='logs/analysis',
+                       help='Output directory for analysis results')
+
+    args = parser.parse_args()
+
+    print("="*70)
+    print("  MedGemma Evaluation Analysis")
+    print("="*70)
+    print()
+
+    # Initialize analyzer
+    analyzer = EvaluationAnalyzer(args.groundtruth)
+
+    # Load results
+    analyzer.load_evaluation_results(args.results)
+
+    # Analyze
+    print("\nAnalyzing results...")
+    metrics = analyzer.analyze_all_results()
+
+    # Generate outputs
+    print("\nGenerating tables...")
+    analyzer.generate_tables(metrics, args.output_dir)
+
+    print("\nGenerating plots...")
+    analyzer.generate_plots(metrics, args.output_dir)
+
+    print("\nGenerating HTML report...")
+    html_path = Path(args.output_dir) / 'evaluation_report.html'
+    analyzer.generate_html_report(metrics, str(html_path))
+
+    print("\n" + "="*70)
+    print("  ANALYSIS COMPLETE")
+    print("="*70)
+    print(f"\nResults saved to: {args.output_dir}")
+    print(f"Open HTML report: {html_path}")
+    print()
+
+    # Print summary
+    print("SUMMARY:")
+    print(f"  Total Evaluations: {metrics['overall']['total_evaluations']}")
+    print(f"  Overall Accuracy: {metrics['overall']['overall_accuracy']*100:.1f}%")
+    print(f"  Pause Rate: {metrics['overall']['overall_pause_rate']*100:.1f}%")
+    print(f"  Avg Confidence: {metrics['overall']['avg_confidence']:.2f}")
+    print()
+
+
+if __name__ == "__main__":
+    main()

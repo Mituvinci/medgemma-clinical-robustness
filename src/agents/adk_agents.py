@@ -123,13 +123,22 @@ def _get_medgemma_specialist():
             )
         return _medgemma_specialist
 
-    # Check if we should use Vertex AI MedGemma
-    if _agent_model_choice == "medgemma-vertex":
+    # Check if we should use Vertex AI MedGemma (1.5-4B-IT, 4B-IT, or 27B-IT)
+    if _agent_model_choice in ["medgemma-vertex", "medgemma-4b-it-vertex", "medgemma-27b-it-vertex"]:
         from src.agents.models.vertex_medgemma_adapter import VertexMedGemmaAdapter
         from src.agents.registry import MODEL_REGISTRY
-        logger.info("Using MedGemma via Vertex AI for agent reasoning")
+
+        # Determine model size for logging
+        if _agent_model_choice == "medgemma-27b-it-vertex":
+            model_size = "27B-IT"
+        elif _agent_model_choice == "medgemma-4b-it-vertex":
+            model_size = "4B-IT"
+        else:
+            model_size = "1.5-4B-IT"
+
+        logger.info(f"Using MedGemma-{model_size} via Vertex AI for agent reasoning (multimodal: image+text)")
         if _medgemma_specialist is None or not isinstance(_medgemma_specialist, VertexMedGemmaAdapter):
-            vertex_config = MODEL_REGISTRY["medgemma-vertex"]
+            vertex_config = MODEL_REGISTRY[_agent_model_choice]
             _medgemma_specialist = VertexMedGemmaAdapter(
                 model_id=vertex_config["model_id"],
                 project_id=vertex_config["project_id"],
@@ -163,11 +172,12 @@ def retrieve_clinical_guidelines(
     """
     logger.info(f"Tool called: retrieve_clinical_guidelines(query='{query[:50]}...', n_results={n_results})")
 
-    # Query ChromaDB
+    # Query RAG system (Vertex RAG or ChromaDB)
+    # Lower threshold for Vertex RAG which returns distance-based scores (0.25-0.4 typical)
     retrieved_docs = _retriever.retrieve(
         query=query,
         n_results=n_results,
-        min_similarity=0.5
+        min_similarity=0.25  # Lowered from 0.5 to work with Vertex RAG scores
     )
 
     # Format for agent consumption

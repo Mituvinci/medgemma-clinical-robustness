@@ -202,6 +202,7 @@ class NEJIMEvaluator:
             case_id=case_id,
             history=case_data["text"],
             physical_exam=None,
+            image_path=case_data.get("image_path"),
             image_data=None,
             context_state=variant
         )

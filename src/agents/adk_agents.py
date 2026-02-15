@@ -841,11 +841,36 @@ class MedGemmaWorkflow:
             case_dict = case.dict(exclude={'image_data'})
             session.set_initial_input(case_dict)
 
-        # Prepare message as Content object
+        # Prepare message as Content object (text + first image if available)
         from google.genai import types as genai_types
+
+        parts = [genai_types.Part(text=user_message)]
+
+        # Attach first image as inline_data for multimodal input
+        if case.image_path:
+            try:
+                from pathlib import Path as _P
+                img_file = _P(case.image_path)
+                if img_file.exists():
+                    ext = img_file.suffix.lower()
+                    mime_map = {".jpeg": "image/jpeg", ".jpg": "image/jpeg",
+                                ".png": "image/png", ".jfif": "image/jpeg"}
+                    mime_type = mime_map.get(ext, "image/jpeg")
+                    with open(img_file, "rb") as f:
+                        img_bytes = f.read()
+                    parts.append(genai_types.Part(
+                        inline_data=genai_types.Blob(
+                            mime_type=mime_type,
+                            data=img_bytes
+                        )
+                    ))
+                    logger.info(f"Attached image: {img_file.name} ({len(img_bytes)} bytes)")
+            except Exception as img_err:
+                logger.warning(f"Could not attach image {case.image_path}: {img_err}")
+
         content = genai_types.Content(
             role="user",
-            parts=[genai_types.Part(text=user_message)]
+            parts=parts
         )
 
         # Run agent workflow and collect responses + log each agent step

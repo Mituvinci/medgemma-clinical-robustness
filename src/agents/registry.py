@@ -83,14 +83,14 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "medgemma-vertex": {
         "adapter": VertexMedGemmaAdapter,
-        "status": "active",
+        "status": "stub",
         "description": "MedGemma-1.5-4B-IT via Vertex AI endpoint",
         "provider": "vertex_ai",
         "requires": "GOOGLE_APPLICATION_CREDENTIALS",
         "model_id": "medgemma-1.5-4b-it",
         "project_id": settings.google_cloud_project,
-        "region": "us-east4",
-        "endpoint_id": "mg-endpoint-ae855a72-bc1a-4c2e-b3cf-b743dc867132",
+        "region": "UPDATE_AFTER_DEPLOY",
+        "endpoint_id": "UPDATE_AFTER_DEPLOY",
         "strengths": [
             "Medical knowledge",
             "Fast inference (4B params)",
@@ -112,7 +112,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "model_id": "google/medgemma-27b-it",
         "project_id": settings.google_cloud_project,
         "region": "us-central1",
-        "endpoint_id": "mg-endpoint-ad04065b-f856-4277-85bd-7d5eea91d9e7",
+        "endpoint_id": "mg-endpoint-ec89fb32-fd4d-4bfb-82e1-7ef11b6c4035",
         "strengths": [
             "Medical knowledge (27B params)",
             "Advanced clinical reasoning",
@@ -130,15 +130,14 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "medgemma-4b-it-vertex": {
         "adapter": VertexMedGemmaAdapter,
-        "status": "stub",
-        "description": "MedGemma-4B-IT via Vertex AI endpoint (multimodal: image+text) - TO BE DEPLOYED",
+        "status": "active",
+        "description": "MedGemma-4B-IT via Vertex AI endpoint (multimodal: image+text)",
         "provider": "vertex_ai",
         "requires": "GOOGLE_APPLICATION_CREDENTIALS",
         "model_id": "google/medgemma-4b-it",
         "project_id": settings.google_cloud_project,
-        "region": "us-central1",
-        "endpoint_id": "PLACEHOLDER_ENDPOINT_ID",
-        "message": "Endpoint will be deployed tomorrow (2026-02-13)",
+        "region": "us-east4",
+        "endpoint_id": "mg-endpoint-669bef4e-1e44-4544-af3d-b142c8b842e9",
         "strengths": [
             "Medical knowledge (4B params)",
             "Fast inference",

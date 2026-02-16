@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Any
 import argparse
 from difflib import SequenceMatcher
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -304,8 +305,15 @@ class EvaluationAnalyzer:
             response_text = result.get('response_text', '')
             pred_diagnosis, confidence = self.extract_diagnosis(response_text)
 
-            # Check if correct
+            # Check if correct (Top-1)
             is_correct = self.fuzzy_match(pred_diagnosis, true_diagnosis)
+
+            # Extract all diagnoses for Top-3 and Top-4 accuracy
+            all_diagnoses = self.extract_all_diagnoses(response_text)
+            top3_diagnoses = all_diagnoses[:3]
+            top4_diagnoses = all_diagnoses[:4]
+            is_top3_correct = any(self.fuzzy_match(d[0], true_diagnosis) for d in top3_diagnoses)
+            is_top4_correct = any(self.fuzzy_match(d[0], true_diagnosis) for d in top4_diagnoses)
 
             # Metrics
             paused = result.get('agentic_pause_triggered', False)
@@ -318,6 +326,10 @@ class EvaluationAnalyzer:
                 var_metrics['total'] += 1
                 if is_correct:
                     var_metrics['correct'] += 1
+                if is_top3_correct:
+                    var_metrics['top3_correct'] += 1
+                if is_top4_correct:
+                    var_metrics['top4_correct'] += 1
                 if paused:
                     var_metrics['paused'] += 1
                 if error:
@@ -327,8 +339,11 @@ class EvaluationAnalyzer:
                 var_metrics['diagnoses'].append({
                     'case_id': case_num,
                     'predicted': pred_diagnosis,
+                    'all_predicted': [d[0] for d in all_diagnoses],
                     'true': true_diagnosis,
                     'correct': is_correct,
+                    'top3_correct': is_top3_correct,
+                    'top4_correct': is_top4_correct,
                     'confidence': confidence,
                     'paused': paused
                 })
@@ -338,8 +353,11 @@ class EvaluationAnalyzer:
                 'case_id': case_num,
                 'variant': variant,
                 'predicted_diagnosis': pred_diagnosis,
+                'all_diagnoses': [d[0] for d in all_diagnoses],
                 'true_diagnosis': true_diagnosis,
                 'correct': is_correct,
+                'top3_correct': is_top3_correct,
+                'top4_correct': is_top4_correct,
                 'confidence': confidence,
                 'paused': paused,
                 'error': error,
@@ -350,6 +368,8 @@ class EvaluationAnalyzer:
         for variant, data in metrics['by_variant'].items():
             if data['total'] > 0:
                 data['accuracy'] = data['correct'] / data['total']
+                data['top3_accuracy'] = data['top3_correct'] / data['total']
+                data['top4_accuracy'] = data['top4_correct'] / data['total']
                 data['pause_rate'] = data['paused'] / data['total']
                 data['error_rate'] = data['errors'] / data['total']
                 data['avg_confidence'] /= data['total']
@@ -361,6 +381,8 @@ class EvaluationAnalyzer:
             metrics['overall'] = {
                 'total_evaluations': total_cases,
                 'overall_accuracy': sum(1 for r in metrics['detailed_results'] if r['correct']) / total_cases,
+                'overall_top3_accuracy': sum(1 for r in metrics['detailed_results'] if r['top3_correct']) / total_cases,
+                'overall_top4_accuracy': sum(1 for r in metrics['detailed_results'] if r['top4_correct']) / total_cases,
                 'overall_pause_rate': sum(1 for r in metrics['detailed_results'] if r['paused']) / total_cases,
                 'overall_error_rate': sum(1 for r in metrics['detailed_results'] if r['error']) / total_cases,
                 'avg_confidence': sum(r['confidence'] for r in metrics['detailed_results']) / total_cases,
@@ -379,7 +401,9 @@ class EvaluationAnalyzer:
             {
                 'Variant': variant,
                 'Total Cases': data['total'],
-                'Accuracy (%)': f"{data['accuracy']*100:.1f}",
+                'Top-1 Acc (%)': f"{data['accuracy']*100:.1f}",
+                'Top-3 Acc (%)': f"{data['top3_accuracy']*100:.1f}",
+                'Top-4 Acc (%)': f"{data['top4_accuracy']*100:.1f}",
                 'Pause Rate (%)': f"{data['pause_rate']*100:.1f}",
                 'Avg Confidence': f"{data['avg_confidence']:.2f}",
                 'Avg Time (s)': f"{data['avg_execution_time_ms']/1000:.1f}",
@@ -413,23 +437,35 @@ class EvaluationAnalyzer:
 
         variants = list(metrics['by_variant'].keys())
 
-        # Plot 1: Accuracy by Variant
-        fig, ax = plt.subplots(figsize=(10, 6))
-        accuracies = [metrics['by_variant'][v]['accuracy'] * 100 for v in variants]
-        colors = ['green' if acc > 70 else 'orange' if acc > 50 else 'red' for acc in accuracies]
+        # Plot 1: Accuracy by Variant (Top-1, Top-3, Top-4 grouped bars)
+        fig, ax = plt.subplots(figsize=(12, 7))
+        top1_accs = [metrics['by_variant'][v]['accuracy'] * 100 for v in variants]
+        top3_accs = [metrics['by_variant'][v]['top3_accuracy'] * 100 for v in variants]
+        top4_accs = [metrics['by_variant'][v]['top4_accuracy'] * 100 for v in variants]
 
-        ax.bar(variants, accuracies, color=colors, alpha=0.7, edgecolor='black')
+        x = np.arange(len(variants))
+        width = 0.25
+
+        bars1 = ax.bar(x - width, top1_accs, width, label='Top-1', alpha=0.8, color='#e74c3c', edgecolor='black')
+        bars2 = ax.bar(x, top3_accs, width, label='Top-3', alpha=0.8, color='#f39c12', edgecolor='black')
+        bars3 = ax.bar(x + width, top4_accs, width, label='Top-4', alpha=0.8, color='#27ae60', edgecolor='black')
+
         ax.set_xlabel('Context Variant', fontsize=12, fontweight='bold')
         ax.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Diagnostic Accuracy by Context Variant', fontsize=14, fontweight='bold')
+        ax.set_title('Diagnostic Accuracy by Context Variant (Top-1 / Top-3 / Top-4)', fontsize=14, fontweight='bold')
         ax.set_ylim(0, 100)
-        ax.axhline(y=70, color='gray', linestyle='--', label='70% Threshold')
-        ax.legend()
+        ax.set_xticks(x)
+        ax.set_xticklabels(variants, rotation=45, ha='right')
+        ax.legend(fontsize=11)
+        ax.grid(axis='y', alpha=0.3)
 
-        for i, v in enumerate(accuracies):
-            ax.text(i, v + 2, f'{v:.1f}%', ha='center', fontweight='bold')
+        for bar_group in [bars1, bars2, bars3]:
+            for bar in bar_group:
+                height = bar.get_height()
+                if height > 0:
+                    ax.text(bar.get_x() + bar.get_width()/2., height + 1,
+                            f'{height:.0f}%', ha='center', va='bottom', fontsize=8, fontweight='bold')
 
-        plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
         plt.savefig(output_path / f'{prefix}accuracy_by_variant.png', dpi=300, bbox_inches='tight')
         plt.close()
@@ -550,9 +586,21 @@ class EvaluationAnalyzer:
             <span class="metric-value">{metrics['overall'].get('total_evaluations', 0)}</span>
         </div>
         <div class="metric-row">
-            <span class="metric-label">Overall Accuracy:</span>
+            <span class="metric-label">Top-1 Accuracy:</span>
             <span class="metric-value {'success' if metrics['overall'].get('overall_accuracy', 0) > 0.7 else 'warning' if metrics['overall'].get('overall_accuracy', 0) > 0.5 else 'error'}">
                 {metrics['overall'].get('overall_accuracy', 0)*100:.1f}%
+            </span>
+        </div>
+        <div class="metric-row">
+            <span class="metric-label">Top-3 Accuracy:</span>
+            <span class="metric-value {'success' if metrics['overall'].get('overall_top3_accuracy', 0) > 0.7 else 'warning' if metrics['overall'].get('overall_top3_accuracy', 0) > 0.5 else 'error'}">
+                {metrics['overall'].get('overall_top3_accuracy', 0)*100:.1f}%
+            </span>
+        </div>
+        <div class="metric-row">
+            <span class="metric-label">Top-4 Accuracy:</span>
+            <span class="metric-value {'success' if metrics['overall'].get('overall_top4_accuracy', 0) > 0.7 else 'warning' if metrics['overall'].get('overall_top4_accuracy', 0) > 0.5 else 'error'}">
+                {metrics['overall'].get('overall_top4_accuracy', 0)*100:.1f}%
             </span>
         </div>
         <div class="metric-row">
@@ -579,7 +627,9 @@ class EvaluationAnalyzer:
     <table>
         <tr>
             <th>Variant</th>
-            <th>Accuracy</th>
+            <th>Top-1 Acc</th>
+            <th>Top-3 Acc</th>
+            <th>Top-4 Acc</th>
             <th>Pause Rate</th>
             <th>Avg Confidence</th>
             <th>Avg Time (s)</th>
@@ -588,10 +638,14 @@ class EvaluationAnalyzer:
 
         for variant, data in metrics['by_variant'].items():
             accuracy_class = 'success' if data['accuracy'] > 0.7 else 'warning' if data['accuracy'] > 0.5 else 'error'
+            top3_class = 'success' if data['top3_accuracy'] > 0.7 else 'warning' if data['top3_accuracy'] > 0.5 else 'error'
+            top4_class = 'success' if data['top4_accuracy'] > 0.7 else 'warning' if data['top4_accuracy'] > 0.5 else 'error'
             html += f"""
         <tr>
             <td><strong>{variant}</strong></td>
             <td class="{accuracy_class}">{data['accuracy']*100:.1f}%</td>
+            <td class="{top3_class}">{data['top3_accuracy']*100:.1f}%</td>
+            <td class="{top4_class}">{data['top4_accuracy']*100:.1f}%</td>
             <td>{data['pause_rate']*100:.1f}%</td>
             <td>{data['avg_confidence']:.2f}</td>
             <td>{data['avg_execution_time_ms']/1000:.1f}s</td>
@@ -610,14 +664,20 @@ class EvaluationAnalyzer:
         original_acc = metrics['by_variant']['original']['accuracy']
         original_pause = metrics['by_variant']['original']['pause_rate']
 
-        html += f"<li><strong>Complete Cases (Original):</strong> {original_acc*100:.1f}% accuracy, "
+        original_top3 = metrics['by_variant']['original']['top3_accuracy']
+        original_top4 = metrics['by_variant']['original']['top4_accuracy']
+
+        html += f"<li><strong>Complete Cases (Original):</strong> Top-1: {original_acc*100:.1f}%, "
+        html += f"Top-3: {original_top3*100:.1f}%, Top-4: {original_top4*100:.1f}% accuracy, "
         html += f"{original_pause*100:.1f}% false positive pause rate</li>"
 
         incomplete_variants = ['history_only', 'image_only', 'exam_only', 'exam_restricted']
         avg_incomplete_pause = sum(metrics['by_variant'][v]['pause_rate'] for v in incomplete_variants) / len(incomplete_variants)
         html += f"<li><strong>Incomplete Cases:</strong> {avg_incomplete_pause*100:.1f}% average pause rate (safety mechanism working)</li>"
 
-        html += f"<li><strong>Robustness:</strong> System maintains {metrics['overall']['overall_accuracy']*100:.1f}% accuracy across all context levels</li>"
+        html += f"<li><strong>Robustness:</strong> Top-1: {metrics['overall']['overall_accuracy']*100:.1f}%, "
+        html += f"Top-3: {metrics['overall']['overall_top3_accuracy']*100:.1f}%, "
+        html += f"Top-4: {metrics['overall']['overall_top4_accuracy']*100:.1f}% accuracy across all context levels</li>"
 
         html += """
         </ul>
@@ -672,14 +732,20 @@ class EvaluationAnalyzer:
             # Determine diagnosis cell value
             if error:
                 diagnosis_cell = "ERROR"
+                all_diag_cell = "ERROR"
             elif paused:
                 diagnosis_cell = "PAUSED"
+                all_diag_cell = "PAUSED"
             else:
-                pred, _ = self.extract_diagnosis(response_text)
+                all_diags = self.extract_all_diagnoses(response_text)
+                pred = all_diags[0][0] if all_diags else "Unknown"
                 diagnosis_cell = pred if pred != "Unknown" else response_text[:200] if response_text else "Unknown"
+                # Format all diagnoses as numbered list
+                all_diag_cell = " | ".join(f"{i+1}. {d[0]}" for i, d in enumerate(all_diags)) if all_diags else "Unknown"
 
             cases[case_num][variant] = {
                 'diagnosis': diagnosis_cell,
+                'all_diagnoses': all_diag_cell,
                 'full_response': response_text
             }
 
@@ -687,6 +753,7 @@ class EvaluationAnalyzer:
         headers = ['Case_ID', 'Ground_Truth']
         for v in variants:
             headers.append(v)
+            headers.append(f'{v}_all_diagnoses')
             headers.append(f'{v}_full_response')
 
         rows = []
@@ -696,9 +763,11 @@ class EvaluationAnalyzer:
             for v in variants:
                 if v in cases[case_num]:
                     row.append(cases[case_num][v]['diagnosis'])
+                    row.append(cases[case_num][v]['all_diagnoses'])
                     row.append(cases[case_num][v]['full_response'])
                 else:
                     row.append("N/A")
+                    row.append("")
                     row.append("")
             rows.append(row)
 
@@ -768,9 +837,11 @@ def main():
     # Print summary
     print("SUMMARY:")
     print(f"  Total Evaluations: {metrics['overall']['total_evaluations']}")
-    print(f"  Overall Accuracy: {metrics['overall']['overall_accuracy']*100:.1f}%")
-    print(f"  Pause Rate: {metrics['overall']['overall_pause_rate']*100:.1f}%")
-    print(f"  Avg Confidence: {metrics['overall']['avg_confidence']:.2f}")
+    print(f"  Top-1 Accuracy:    {metrics['overall']['overall_accuracy']*100:.1f}%")
+    print(f"  Top-3 Accuracy:    {metrics['overall']['overall_top3_accuracy']*100:.1f}%")
+    print(f"  Top-4 Accuracy:    {metrics['overall']['overall_top4_accuracy']*100:.1f}%")
+    print(f"  Pause Rate:        {metrics['overall']['overall_pause_rate']*100:.1f}%")
+    print(f"  Avg Confidence:    {metrics['overall']['avg_confidence']:.2f}")
     print()
 
 

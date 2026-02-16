@@ -63,14 +63,18 @@ class EvaluationAnalyzer:
                 diagnosis = row['Ground_Truth'].strip()
 
                 # Parse date and convert to case_id format
-                # "1/2/2025" → "01_02_25"
-                try:
-                    date_obj = datetime.strptime(date_str, '%m/%d/%Y')
-                    case_id = date_obj.strftime('%m_%d_%y')
-                    groundtruth[case_id] = diagnosis
-                except ValueError:
-                    print(f"Warning: Could not parse date: {date_str}")
-                    continue
+                # "1/2/2025" → "01_02_25" (NEJM format)
+                # "01_01_23" → already in case_id format (JDCR format)
+                if '/' in date_str:
+                    try:
+                        date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                        case_id = date_obj.strftime('%m_%d_%y')
+                        groundtruth[case_id] = diagnosis
+                    except ValueError:
+                        print(f"Warning: Could not parse date: {date_str}")
+                        continue
+                else:
+                    groundtruth[date_str] = diagnosis
 
         print(f"Loaded {len(groundtruth)} ground truth diagnoses")
         return groundtruth
@@ -101,36 +105,129 @@ class EvaluationAnalyzer:
         Returns:
             (diagnosis, confidence) tuple
         """
-        # Pattern 1: **Primary Diagnosis:** **Text**
-        pattern1 = r'\*\*Primary Diagnosis:\*\*\s*\*\*([^*\n]+)\*\*'
+        # Helper to extract confidence from nearby text
+        def _extract_confidence(text: str) -> float:
+            for cp in [
+                r'Confidence(?:\s+Score)?[:\s]+\*?\*?([\d.]+)',
+                r'\(Confidence[:\s]+([\d.]+)\)',
+            ]:
+                cm = re.search(cp, text, re.IGNORECASE)
+                if cm:
+                    try:
+                        return float(cm.group(1))
+                    except ValueError:
+                        pass
+            return 0.5
+
+        # Helper to clean diagnosis text
+        def _clean(diag: str) -> str:
+            diag = re.sub(r'\*\*', '', diag)  # remove bold markdown
+            diag = re.sub(r'\*', '', diag)    # remove italic markdown
+            diag = re.sub(r'^\s*[*\-•]\s*', '', diag)  # remove leading bullets
+            diag = re.sub(r'^\s*\d+[.)]\s*', '', diag)  # remove leading numbers
+            # Remove trailing confidence text
+            diag = re.sub(r'\s*[-–]\s*Confidence.*$', '', diag, flags=re.IGNORECASE)
+            diag = re.sub(r'\s*\(Confidence[^)]*\)\s*$', '', diag, flags=re.IGNORECASE)
+            # Remove trailing colon
+            diag = diag.rstrip(':').strip()
+            return diag
+
+        # Pattern 1: **Primary Diagnosis:** on same line or next line with bullet
+        # Handles: **Primary Diagnosis:** **Text** and **Primary Diagnosis:**\n*   **Text**
+        pattern1 = r'\*\*Primary Diagnosis:\*\*\s*(?:\n\s*[*\-1-9.]*\s*)?(?:\*\*)?(.+?)(?:\*\*)?(?:\s*[-–]\s*Confidence|\s*\(Confidence|\n|$)'
         match = re.search(pattern1, response_text, re.IGNORECASE)
         if match:
-            diagnosis = match.group(1).strip()
+            diagnosis = _clean(match.group(1))
+            if diagnosis and diagnosis.lower() != 'unknown':
+                confidence = _extract_confidence(response_text[match.start():match.start()+500])
+                return diagnosis, confidence
 
-            # Extract confidence if present
-            conf_pattern = r'\*\*Confidence Score:\*\*\s*([\d.]+)'
-            conf_match = re.search(conf_pattern, response_text)
-            confidence = float(conf_match.group(1)) if conf_match else 0.5
-
-            return diagnosis, confidence
-
-        # Pattern 2: Primary Diagnosis: Text (no asterisks)
-        pattern2 = r'Primary Diagnosis:\s*([^\n]+?)(?:\s*\(|$)'
+        # Pattern 2: Primary Diagnosis: Text (no bold markers)
+        pattern2 = r'Primary Diagnosis:\s*(?:\n\s*[*\-1-9.]*\s*)?(.+?)(?:\s*[-–]\s*Confidence|\s*\(Confidence|\n|$)'
         match = re.search(pattern2, response_text, re.IGNORECASE)
         if match:
-            diagnosis = match.group(1).strip()
-            # Remove markdown formatting
-            diagnosis = re.sub(r'\*\*', '', diagnosis)
-            return diagnosis, 0.5
+            diagnosis = _clean(match.group(1))
+            if diagnosis and diagnosis.lower() != 'unknown':
+                confidence = _extract_confidence(response_text[match.start():match.start()+500])
+                return diagnosis, confidence
 
-        # Pattern 3: Assessment section first diagnosis
-        pattern3 = r'Assessment \(A\):[^\n]*\n[^\n]*?([A-Z][a-z]+(?:\s+[a-z]+){0,5})'
+        # Pattern 3: Assessment section - look for first bold diagnosis name
+        pattern3 = r'Assessment \(A\):.*?\n.*?\*\*([^*\n]+)\*\*'
         match = re.search(pattern3, response_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            diagnosis = _clean(match.group(1))
+            if diagnosis:
+                return diagnosis, 0.3
+
+        # Pattern 4: Assessment section - any capitalized diagnosis phrase
+        pattern4 = r'Assessment \(A\):[^\n]*\n[^\n]*?([A-Z][a-z]+(?:\s+[a-z]+){0,5})'
+        match = re.search(pattern4, response_text, re.IGNORECASE | re.DOTALL)
         if match:
             return match.group(1).strip(), 0.3
 
         # No diagnosis found
         return "Unknown", 0.0
+
+    def extract_all_diagnoses(self, response_text: str) -> List[Tuple[str, float]]:
+        """
+        Extract primary + all differential diagnoses from SOAP note response.
+
+        Returns:
+            List of (diagnosis, confidence) tuples, primary first then differentials.
+        """
+        diagnoses = []
+
+        # Helper to clean diagnosis text (same as in extract_diagnosis)
+        def _clean(diag: str) -> str:
+            diag = re.sub(r'\*\*', '', diag)
+            diag = re.sub(r'\*', '', diag)
+            diag = re.sub(r'^\s*[*\-•]\s*', '', diag)
+            diag = re.sub(r'^\s*\d+[.)]\s*', '', diag)
+            diag = re.sub(r'\s*[-–]\s*Confidence.*$', '', diag, flags=re.IGNORECASE)
+            diag = re.sub(r'\s*\(Confidence[^)]*\)\s*$', '', diag, flags=re.IGNORECASE)
+            diag = diag.rstrip(':').strip()
+            return diag
+
+        def _extract_confidence(text: str) -> float:
+            for cp in [
+                r'Confidence(?:\s+Score)?[:\s]+\*?\*?([\d.]+)',
+                r'\(Confidence[:\s]+([\d.]+)\)',
+            ]:
+                cm = re.search(cp, text, re.IGNORECASE)
+                if cm:
+                    try:
+                        return float(cm.group(1))
+                    except ValueError:
+                        pass
+            return 0.5
+
+        # Get primary diagnosis first
+        primary, primary_conf = self.extract_diagnosis(response_text)
+        if primary != "Unknown":
+            diagnoses.append((primary, primary_conf))
+
+        # Extract differential diagnoses
+        # Pattern: **Diagnosis Name** - Confidence: 0.XX or (Confidence: 0.XX)
+        # These appear after "Differential Diagnos" section
+        diff_section = re.search(
+            r'Differential Diagnos[ei]s.*?(?=###|\Z)',
+            response_text, re.IGNORECASE | re.DOTALL
+        )
+        if diff_section:
+            section_text = diff_section.group(0)
+            # Find each differential: bold text that looks like a diagnosis
+            diff_pattern = r'(?:\*\*|^)\s*(?:\d+[.)]\s*)?(?:\*\*)?([A-Z][^*\n]{3,80}?)(?:\*\*)\s*'
+            for m in re.finditer(diff_pattern, section_text, re.MULTILINE):
+                diag = _clean(m.group(1))
+                if diag and diag.lower() not in ('evidence', 'rationale', 'supporting evidence',
+                                                   'confidence', 'confidence score', 'plan',
+                                                   'differential diagnoses', 'differential diagnosis'):
+                    conf = _extract_confidence(section_text[m.start():m.start()+300])
+                    # Avoid duplicating primary
+                    if not any(self.fuzzy_match(diag, d[0], 0.85) for d in diagnoses):
+                        diagnoses.append((diag, conf))
+
+        return diagnoses
 
     def fuzzy_match(self, pred: str, true: str, threshold: float = 0.7) -> bool:
         """
@@ -180,6 +277,8 @@ class EvaluationAnalyzer:
             metrics['by_variant'][variant] = {
                 'total': 0,
                 'correct': 0,
+                'top3_correct': 0,
+                'top4_correct': 0,
                 'paused': 0,
                 'errors': 0,
                 'avg_confidence': 0.0,
@@ -270,7 +369,7 @@ class EvaluationAnalyzer:
 
         return metrics
 
-    def generate_tables(self, metrics: Dict, output_dir: str):
+    def generate_tables(self, metrics: Dict, output_dir: str, prefix: str = ''):
         """Generate markdown and CSV tables from metrics."""
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -290,24 +389,24 @@ class EvaluationAnalyzer:
         ])
 
         # Save CSV
-        variant_df.to_csv(output_path / 'metrics_by_variant.csv', index=False)
+        variant_df.to_csv(output_path / f'{prefix}metrics_by_variant.csv', index=False)
 
         # Save Markdown
-        with open(output_path / 'metrics_by_variant.md', 'w') as f:
+        with open(output_path / f'{prefix}metrics_by_variant.md', 'w') as f:
             f.write("# Evaluation Metrics by Context Variant\n\n")
             f.write(variant_df.to_markdown(index=False))
             f.write("\n")
 
-        print(f"✓ Saved metrics table to {output_path}/metrics_by_variant.csv")
+        print(f"✓ Saved metrics table to {output_path}/{prefix}metrics_by_variant.csv")
 
         # Table 2: Detailed Results
         detailed_df = pd.DataFrame(metrics['detailed_results'])
-        detailed_df.to_csv(output_path / 'detailed_results.csv', index=False)
-        print(f"✓ Saved detailed results to {output_path}/detailed_results.csv")
+        detailed_df.to_csv(output_path / f'{prefix}detailed_results.csv', index=False)
+        print(f"✓ Saved detailed results to {output_path}/{prefix}detailed_results.csv")
 
         return variant_df
 
-    def generate_plots(self, metrics: Dict, output_dir: str):
+    def generate_plots(self, metrics: Dict, output_dir: str, prefix: str = ''):
         """Generate visualization plots."""
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -332,9 +431,9 @@ class EvaluationAnalyzer:
 
         plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
-        plt.savefig(output_path / 'accuracy_by_variant.png', dpi=300, bbox_inches='tight')
+        plt.savefig(output_path / f'{prefix}accuracy_by_variant.png', dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"✓ Saved plot to {output_path}/accuracy_by_variant.png")
+        print(f"✓ Saved plot to {output_path}/{prefix}accuracy_by_variant.png")
 
         # Plot 2: Pause Rate by Variant
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -359,9 +458,9 @@ class EvaluationAnalyzer:
         ax.legend()
 
         plt.tight_layout()
-        plt.savefig(output_path / 'pause_rate_by_variant.png', dpi=300, bbox_inches='tight')
+        plt.savefig(output_path / f'{prefix}pause_rate_by_variant.png', dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"✓ Saved plot to {output_path}/pause_rate_by_variant.png")
+        print(f"✓ Saved plot to {output_path}/{prefix}pause_rate_by_variant.png")
 
         # Plot 3: Confidence vs Accuracy Scatter
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -380,9 +479,9 @@ class EvaluationAnalyzer:
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(output_path / 'confidence_vs_accuracy.png', dpi=300, bbox_inches='tight')
+        plt.savefig(output_path / f'{prefix}confidence_vs_accuracy.png', dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"✓ Saved plot to {output_path}/confidence_vs_accuracy.png")
+        print(f"✓ Saved plot to {output_path}/{prefix}confidence_vs_accuracy.png")
 
         # Plot 4: Execution Time by Variant
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -398,9 +497,9 @@ class EvaluationAnalyzer:
 
         plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
-        plt.savefig(output_path / 'execution_time_by_variant.png', dpi=300, bbox_inches='tight')
+        plt.savefig(output_path / f'{prefix}execution_time_by_variant.png', dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"✓ Saved plot to {output_path}/execution_time_by_variant.png")
+        print(f"✓ Saved plot to {output_path}/{prefix}execution_time_by_variant.png")
 
     def generate_html_report(self, metrics: Dict, output_path: str):
         """Generate comprehensive HTML report."""
@@ -537,6 +636,83 @@ class EvaluationAnalyzer:
         print(f"✓ Saved HTML report to {output_path}")
 
 
+    def generate_side_by_side_csv(self, output_dir: str, prefix: str = ''):
+        """
+        Generate a CSV with all 5 variants side-by-side per case for manual verification.
+
+        Format: Case_ID | Ground_Truth | original | original_full_response | history_only | ... | exam_restricted_full_response
+        - If model paused → "PAUSED"
+        - If error → "ERROR"
+        - Otherwise → extracted diagnosis text
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        variants = ['original', 'history_only', 'image_only', 'exam_only', 'exam_restricted']
+
+        # Group results by case_id
+        cases = {}
+        for result in self.results_data:
+            case_id = result['case_id']
+            variant = result['variant']
+
+            # Extract base case_id (e.g., "JDCR_01_01_23_original" → "01_01_23")
+            case_match = re.search(r'(\d{2}_\d{2}_\d{2})', case_id)
+            if not case_match:
+                continue
+            case_num = case_match.group(1)
+
+            if case_num not in cases:
+                cases[case_num] = {}
+
+            response_text = result.get('response_text', '')
+            paused = result.get('agentic_pause_triggered', False)
+            error = result.get('error') is not None
+
+            # Determine diagnosis cell value
+            if error:
+                diagnosis_cell = "ERROR"
+            elif paused:
+                diagnosis_cell = "PAUSED"
+            else:
+                pred, _ = self.extract_diagnosis(response_text)
+                diagnosis_cell = pred if pred != "Unknown" else response_text[:200] if response_text else "Unknown"
+
+            cases[case_num][variant] = {
+                'diagnosis': diagnosis_cell,
+                'full_response': response_text
+            }
+
+        # Build CSV rows
+        headers = ['Case_ID', 'Ground_Truth']
+        for v in variants:
+            headers.append(v)
+            headers.append(f'{v}_full_response')
+
+        rows = []
+        for case_num in sorted(cases.keys()):
+            true_diagnosis = self.groundtruth.get(case_num, "Unknown")
+            row = [case_num, true_diagnosis]
+            for v in variants:
+                if v in cases[case_num]:
+                    row.append(cases[case_num][v]['diagnosis'])
+                    row.append(cases[case_num][v]['full_response'])
+                else:
+                    row.append("N/A")
+                    row.append("")
+            rows.append(row)
+
+        # Write CSV
+        csv_path = output_path / f'{prefix}side_by_side_results.csv'
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerows(rows)
+
+        print(f"✓ Saved side-by-side results to {csv_path}")
+        print(f"  {len(rows)} cases x {len(variants)} variants")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze MedGemma evaluation results')
     parser.add_argument('--results', type=str, required=True,
@@ -545,6 +721,8 @@ def main():
                        help='Path to ground truth CSV file')
     parser.add_argument('--output-dir', type=str, default='logs/analysis',
                        help='Output directory for analysis results')
+    parser.add_argument('--prefix', type=str, default='',
+                       help='Prefix for output file names (e.g., nejm_medgemma-27b-it_without_options)')
 
     args = parser.parse_args()
 
@@ -563,15 +741,21 @@ def main():
     print("\nAnalyzing results...")
     metrics = analyzer.analyze_all_results()
 
+    # Build file prefix
+    prefix = args.prefix + '_' if args.prefix else ''
+
     # Generate outputs
     print("\nGenerating tables...")
-    analyzer.generate_tables(metrics, args.output_dir)
+    analyzer.generate_tables(metrics, args.output_dir, prefix)
+
+    print("\nGenerating side-by-side CSV...")
+    analyzer.generate_side_by_side_csv(args.output_dir, prefix)
 
     print("\nGenerating plots...")
-    analyzer.generate_plots(metrics, args.output_dir)
+    analyzer.generate_plots(metrics, args.output_dir, prefix)
 
     print("\nGenerating HTML report...")
-    html_path = Path(args.output_dir) / 'evaluation_report.html'
+    html_path = Path(args.output_dir) / f'{prefix}evaluation_report.html'
     analyzer.generate_html_report(metrics, str(html_path))
 
     print("\n" + "="*70)

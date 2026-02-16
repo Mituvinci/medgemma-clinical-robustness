@@ -83,14 +83,14 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "medgemma-vertex": {
         "adapter": VertexMedGemmaAdapter,
-        "status": "stub",
+        "status": "active",
         "description": "MedGemma-1.5-4B-IT via Vertex AI endpoint",
         "provider": "vertex_ai",
         "requires": "GOOGLE_APPLICATION_CREDENTIALS",
         "model_id": "medgemma-1.5-4b-it",
         "project_id": settings.google_cloud_project,
-        "region": "UPDATE_AFTER_DEPLOY",
-        "endpoint_id": "UPDATE_AFTER_DEPLOY",
+        "region": "us-east4",
+        "endpoint_id": "mg-endpoint-aadfd050-433b-44cb-ab84-d72ee01e0a6a",
         "strengths": [
             "Medical knowledge",
             "Fast inference (4B params)",

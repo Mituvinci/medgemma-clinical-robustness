@@ -33,7 +33,7 @@ Two-tier hybrid system:
 
 **Datasets**:
 - NEJM Image Challenge: 25 challenging dermatology cases (out-of-domain)
-- JAADCR Case Reports: 25 domain-matched cases with ground truth extracted via Gemini API
+- JAADCR Case Reports: 25 open access (CC BY-NC-ND 4.0) domain-matched cases with ground truth extracted via Gemini API. See [JAADCR_EVALUATION_CASES.md](JAADCR_EVALUATION_CASES.md) for full case list with source URLs.
 
 **Context Variants** (per case): Original (complete), History only, Image only, Exam only, Exam restricted (vague)
 

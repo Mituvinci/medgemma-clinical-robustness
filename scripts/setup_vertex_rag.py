@@ -22,9 +22,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-PROJECT_ID = "gen-lang-client-0311980685"
+PROJECT_ID = "medgemma-kaggle-487619"
 LOCATION = "us-west1"  # us-central1/us-east4 restricted, us-east1 had capacity issues
-GCS_BUCKET = "gs://aad_state_pearl_jaad_cr_derm_data"
+GCS_BUCKET = "gs://aad_state_pearl_jaad_cr_derm_data_1"
 CORPUS_DISPLAY_NAME = "medgemma-derm-guidelines"
 
 # Chunking config (matching current ChromaDB settings)

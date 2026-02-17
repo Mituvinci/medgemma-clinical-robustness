@@ -25,6 +25,28 @@ Two-tier hybrid system:
 2. Research Agent -- retrieves clinical guidelines from Vertex AI RAG (55 documents: AAD, StatPearls, JAADCR)
 3. Diagnostic Agent -- generates SOAP note with differential diagnoses and guideline citations
 
+### Example: Multi-Agent Workflow in Action
+
+**Complete case (diagnosis provided):**
+
+> *Input:* "A 45-year-old woman presents with a 3-week history of an itchy, scaly, well-demarcated erythematous plaque on her right elbow. No new medications. Family history of autoimmune disease. On exam: silvery-white scale on an erythematous base, Auspitz sign positive."
+
+| Agent | Action |
+|-------|--------|
+| **Triage (MedGemma)** | Missing Items: None. Case data is complete -- history, exam findings, demographics present. **Proceed.** |
+| **Research (MedGemma + RAG)** | Query: "well-demarcated erythematous scaly plaque elbow Auspitz sign" -- 4 guidelines retrieved (AAD Psoriasis Guidelines, StatPearls Plaque Psoriasis). Synthesis: presentation consistent with plaque-type psoriasis given classic morphology and Auspitz sign. |
+| **Diagnostic (MedGemma)** | **SOAP Note** -- Primary Dx: Plaque Psoriasis (Confidence: 0.90). Differentials: Nummular Dermatitis (0.40), Tinea Corporis (0.25). Plan: KOH prep to rule out fungal, initiate topical corticosteroid, dermatology referral. |
+
+**Incomplete case (agentic pause):**
+
+> *Input:* "A patient has a skin rash."
+
+| Agent | Action |
+|-------|--------|
+| **Triage (MedGemma)** | Missing Items: Patient age, rash location, duration, morphology, associated symptoms. **Request Clarification.** Questions: "What is the patient's age?", "Where on the body is the rash?", "How long has it been present?" |
+
+The workflow **pauses** -- no diagnosis attempted. This is the core safety behavior.
+
 ---
 
 ## Evaluation
@@ -37,17 +59,28 @@ Two-tier hybrid system:
 
 **Context Variants** (per case): Original (complete), History only, Image only, Exam only, Exam restricted (vague)
 
-**Key Results** (completed runs):
+**Key Results** (1,500 evaluations complete -- original variant, complete cases):
 
-| Model | Dataset | Original Pause Rate | Incomplete Pause Rate | Errors |
-|-------|---------|--------------------|-----------------------|--------|
-| MedGemma-1.5-4B-IT | NEJM (no options) | 24% | 92% | 0 |
-| MedGemma-1.5-4B-IT | NEJM (with options) | 12% | 99% | 0 |
-| MedGemma-27B-IT | NEJM (no options) | 17% | 92% | 4 |
-| MedGemma-27B-IT | NEJM (with options) | 17% | 94% | 13 |
-| MedGemma-4B-IT | NEJM + JAADCR | In progress | In progress | -- |
+| Model | Dataset | Format | Top-1 | Top-3 | Top-4 | Orig Pause | Incomplete Pause |
+|-------|---------|--------|-------|-------|-------|------------|------------------|
+| MedGemma-4B-IT | NEJM | no options | **36%** | **44%** | **44%** | 20% | 92% |
+| MedGemma-27B-IT | NEJM | no options | 32% | 32% | 36% | 16% | 90% |
+| MedGemma-27B-IT | NEJM | with options | 28% | 28% | 28% | 16% | 83% |
+| MedGemma-4B-IT | NEJM | with options | 16% | 20% | 24% | 12% | 94% |
+| MedGemma-1.5-4B-IT | NEJM | no options | 12% | 16% | 16% | 24% | 92% |
+| MedGemma-1.5-4B-IT | NEJM | with options | 8% | 8% | 8% | 12% | 99% |
+| MedGemma-1.5-4B-IT | JAADCR | with options | **52%** | **52%** | **52%** | 20% | 92% |
+| MedGemma-27B-IT | JAADCR | no options | 24% | 28% | 32% | 32% | 90% |
+| MedGemma-27B-IT | JAADCR | with options | 32% | 32% | 32% | 16% | 88% |
+| MedGemma-4B-IT | JAADCR | with options | 24% | 24% | 24% | 20% | 87% |
+| MedGemma-1.5-4B-IT | JAADCR | no options | 20% | 20% | 20% | 16% | 90% |
+| MedGemma-4B-IT | JAADCR | no options | 16% | 16% | 16% | 28% | 94% |
 
-Pattern: provides diagnoses on complete cases, pauses on incomplete ones. This is the robustness behavior.
+**Key patterns:**
+- Provides diagnoses on complete cases (0-32% pause), pauses on incomplete ones (83-99% pause). This is the robustness behavior.
+- Top-3/Top-4 accuracy improves over Top-1, showing correct diagnoses appear in differentials.
+- Best NEJM (out-of-domain): MedGemma-4B-IT at 36% Top-1, 44% Top-3.
+- Best JAADCR (domain-matched): MedGemma-1.5-4B-IT with options at 52% Top-1.
 
 ---
 
@@ -89,7 +122,7 @@ python scripts/evaluate_nejim_cases.py \
   --max-cases 1
 
 # JAADCR evaluation
-python JAADCR/new/stage_3_evaluate_jdcr.py \
+python scripts/evaluate_jdcr_cases.py \
   --input JAADCR/jaadcr_input \
   --agent-model medgemma-4b-it-vertex \
   --max-cases 1
@@ -111,7 +144,7 @@ python scripts/jdcr_data_downlaod_preprocess/stage_2_build_ground_truth.py \
   --metadata-dir ./output/case_metadata --output-csv ./output/JAADCR_Groundtruth.csv
 
 # Stage 3: Evaluate with MedGemma
-python scripts/jdcr_data_downlaod_preprocess/stage_3_evaluate_jdcr.py \
+python scripts/evaluate_jdcr_cases.py \
   --input ./output/jaadcr_input --agent-model medgemma-27b-it-vertex
 ```
 
@@ -132,4 +165,4 @@ python scripts/jdcr_data_downlaod_preprocess/stage_3_evaluate_jdcr.py \
 
 Apache 2.0 License
 
-Last Updated: February 14, 2026
+Last Updated: February 15, 2026

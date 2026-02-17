@@ -2,20 +2,20 @@
 #
 # Run Analysis on ALL Evaluation Results
 #
-# Generates for each evaluation run (all files prefixed with model_dataset_options):
-#   - {prefix}_side_by_side_results.csv (Case_ID | Ground_Truth | 5 variants + full responses)
-#   - {prefix}_metrics_by_variant.csv (accuracy, pause rate, confidence per variant)
-#   - {prefix}_detailed_results.csv (per-case per-variant breakdown)
+# ALL output goes to ONE folder: logs/all_analysis/
+# Each file is prefixed with dataset_model_options to stay unique.
+#
+# Generates per run:
+#   - {prefix}_side_by_side_results.csv
+#   - {prefix}_metrics_by_variant.csv
+#   - {prefix}_detailed_results.csv
 #   - {prefix}_accuracy_by_variant.png
 #   - {prefix}_pause_rate_by_variant.png
 #   - {prefix}_confidence_vs_accuracy.png
 #   - {prefix}_execution_time_by_variant.png
 #   - {prefix}_evaluation_report.html
 #
-# Covers:
-#   NEJM:  3 models x 2 data paths (with/without options) = 6 runs
-#   JDCR:  3 models x 2 data paths (with/without options) = 6 runs
-#   Total: 12 analysis runs
+# Total: 12 analysis runs → 96 files in logs/all_analysis/
 #
 # Usage:
 #   bash bin/run_all_analysis.sh
@@ -29,10 +29,14 @@ cd "$PROJECT_DIR"
 SCRIPT="scripts/analyze_evaluation_results.py"
 NEJM_GT="NEJIM/NEJM_Groundtruth.csv"
 JDCR_GT="JAADCR/JAADCR_Groundtruth.csv"
+OUT="logs/all_analysis"
+
+mkdir -p "$OUT"
 
 echo "========================================================================"
 echo "  MedGemma - Run All Evaluation Analysis"
 echo "  12 analysis runs (6 NEJM + 6 JDCR)"
+echo "  Output: $OUT"
 echo "========================================================================"
 echo ""
 echo "Started: $(date)"
@@ -58,7 +62,7 @@ echo "--- [1/12] NEJM: MedGemma-1.5-4B-IT WITHOUT options ---"
 python "$SCRIPT" \
     --results logs/nejm_evaluated/evaluation_medgemma-1.5-4b-it_without_options/nejim_evaluation_20260212_000001.json \
     --groundtruth "$NEJM_GT" \
-    --output-dir logs/nejm_evaluated/analysis_1.5-4b-it_without_options \
+    --output-dir "$OUT" \
     --prefix nejm_medgemma-1.5-4b-it_without_options
 
 echo ""
@@ -66,7 +70,7 @@ echo "--- [2/12] NEJM: MedGemma-1.5-4B-IT WITH options ---"
 python "$SCRIPT" \
     --results logs/nejm_evaluated/evaluation_medgemma-1.5-4b-it_with_options/nejim_evaluation_20260211_235104.json \
     --groundtruth "$NEJM_GT" \
-    --output-dir logs/nejm_evaluated/analysis_1.5-4b-it_with_options \
+    --output-dir "$OUT" \
     --prefix nejm_medgemma-1.5-4b-it_with_options
 
 # --- NEJM: MedGemma-27B-IT ---
@@ -75,7 +79,7 @@ echo "--- [3/12] NEJM: MedGemma-27B-IT WITHOUT options ---"
 python "$SCRIPT" \
     --results logs/nejm_evaluated/evaluation_medgemma-27b-it-vertex_without_options/nejim_evaluation_20260212_230548.json \
     --groundtruth "$NEJM_GT" \
-    --output-dir logs/nejm_evaluated/analysis_27b-it_without_options \
+    --output-dir "$OUT" \
     --prefix nejm_medgemma-27b-it_without_options
 
 echo ""
@@ -83,7 +87,7 @@ echo "--- [4/12] NEJM: MedGemma-27B-IT WITH options ---"
 python "$SCRIPT" \
     --results logs/nejm_evaluated/evaluation_medgemma-27b-it-vertex_with_options/nejim_evaluation_20260213_010034.json \
     --groundtruth "$NEJM_GT" \
-    --output-dir logs/nejm_evaluated/analysis_27b-it_with_options \
+    --output-dir "$OUT" \
     --prefix nejm_medgemma-27b-it_with_options
 
 # --- NEJM: MedGemma-4B-IT ---
@@ -92,7 +96,7 @@ echo "--- [5/12] NEJM: MedGemma-4B-IT WITHOUT options ---"
 python "$SCRIPT" \
     --results logs/nejm_evaluated/evaluation_medgemma-4b-it-vertex_without_options/nejim_evaluation_20260214_230330.json \
     --groundtruth "$NEJM_GT" \
-    --output-dir logs/nejm_evaluated/analysis_4b-it_without_options \
+    --output-dir "$OUT" \
     --prefix nejm_medgemma-4b-it_without_options
 
 echo ""
@@ -100,7 +104,7 @@ echo "--- [6/12] NEJM: MedGemma-4B-IT WITH options ---"
 python "$SCRIPT" \
     --results logs/nejm_evaluated/evaluation_medgemma-4b-it-vertex_with_options/nejim_evaluation_20260215_005151.json \
     --groundtruth "$NEJM_GT" \
-    --output-dir logs/nejm_evaluated/analysis_4b-it_with_options \
+    --output-dir "$OUT" \
     --prefix nejm_medgemma-4b-it_with_options
 
 echo ""
@@ -114,7 +118,7 @@ echo "--- [7/12] JDCR: MedGemma-1.5-4B-IT WITHOUT options ---"
 python "$SCRIPT" \
     --results logs/jaadcr_evaluated/evaluation_medgemma-1.5-4b-it-vertex_without_options/jdcr_evaluation_20260215_173426.json \
     --groundtruth "$JDCR_GT" \
-    --output-dir logs/jaadcr_evaluated/analysis_1.5-4b-it_without_options \
+    --output-dir "$OUT" \
     --prefix jdcr_medgemma-1.5-4b-it_without_options
 
 echo ""
@@ -122,7 +126,7 @@ echo "--- [8/12] JDCR: MedGemma-1.5-4B-IT WITH options ---"
 python "$SCRIPT" \
     --results logs/jaadcr_evaluated/evaluation_medgemma-1.5-4b-it-vertex_with_options/jdcr_evaluation_20260215_192156.json \
     --groundtruth "$JDCR_GT" \
-    --output-dir logs/jaadcr_evaluated/analysis_1.5-4b-it_with_options \
+    --output-dir "$OUT" \
     --prefix jdcr_medgemma-1.5-4b-it_with_options
 
 # --- JDCR: MedGemma-27B-IT ---
@@ -131,7 +135,7 @@ echo "--- [9/12] JDCR: MedGemma-27B-IT WITHOUT options ---"
 python "$SCRIPT" \
     --results logs/jaadcr_evaluated/evaluation_medgemma-27b-it-vertex_without_options/jdcr_evaluation_20260215_095311.json \
     --groundtruth "$JDCR_GT" \
-    --output-dir logs/jaadcr_evaluated/analysis_27b-it_without_options \
+    --output-dir "$OUT" \
     --prefix jdcr_medgemma-27b-it_without_options
 
 echo ""
@@ -139,7 +143,7 @@ echo "--- [10/12] JDCR: MedGemma-27B-IT WITH options ---"
 python "$SCRIPT" \
     --results logs/jaadcr_evaluated/evaluation_medgemma-27b-it-vertex_with_options/jdcr_evaluation_20260215_114957.json \
     --groundtruth "$JDCR_GT" \
-    --output-dir logs/jaadcr_evaluated/analysis_27b-it_with_options \
+    --output-dir "$OUT" \
     --prefix jdcr_medgemma-27b-it_with_options
 
 # --- JDCR: MedGemma-4B-IT ---
@@ -148,7 +152,7 @@ echo "--- [11/12] JDCR: MedGemma-4B-IT WITHOUT options ---"
 python "$SCRIPT" \
     --results logs/jaadcr_evaluated/evaluation_medgemma-4b-it-vertex_without_options/jdcr_evaluation_20260215_024018.json \
     --groundtruth "$JDCR_GT" \
-    --output-dir logs/jaadcr_evaluated/analysis_4b-it_without_options \
+    --output-dir "$OUT" \
     --prefix jdcr_medgemma-4b-it_without_options
 
 echo ""
@@ -156,7 +160,7 @@ echo "--- [12/12] JDCR: MedGemma-4B-IT WITH options ---"
 python "$SCRIPT" \
     --results logs/jaadcr_evaluated/evaluation_medgemma-4b-it-vertex_with_options/jdcr_evaluation_20260215_043416.json \
     --groundtruth "$JDCR_GT" \
-    --output-dir logs/jaadcr_evaluated/analysis_4b-it_with_options \
+    --output-dir "$OUT" \
     --prefix jdcr_medgemma-4b-it_with_options
 
 echo ""
@@ -165,28 +169,9 @@ echo "  ALL 12 ANALYSIS RUNS COMPLETE"
 echo "========================================================================"
 echo "Finished: $(date)"
 echo ""
-echo "Output files per analysis folder (example for NEJM 27B without options):"
-echo "  nejm_medgemma-27b-it_without_options_side_by_side_results.csv"
-echo "  nejm_medgemma-27b-it_without_options_metrics_by_variant.csv"
-echo "  nejm_medgemma-27b-it_without_options_detailed_results.csv"
-echo "  nejm_medgemma-27b-it_without_options_accuracy_by_variant.png"
-echo "  nejm_medgemma-27b-it_without_options_pause_rate_by_variant.png"
-echo "  nejm_medgemma-27b-it_without_options_confidence_vs_accuracy.png"
-echo "  nejm_medgemma-27b-it_without_options_execution_time_by_variant.png"
-echo "  nejm_medgemma-27b-it_without_options_evaluation_report.html"
+echo "All 96 output files in: $OUT"
 echo ""
-echo "NEJM analysis folders:"
-echo "  logs/nejm_evaluated/analysis_1.5-4b-it_without_options/"
-echo "  logs/nejm_evaluated/analysis_1.5-4b-it_with_options/"
-echo "  logs/nejm_evaluated/analysis_27b-it_without_options/"
-echo "  logs/nejm_evaluated/analysis_27b-it_with_options/"
-echo "  logs/nejm_evaluated/analysis_4b-it_without_options/"
-echo "  logs/nejm_evaluated/analysis_4b-it_with_options/"
-echo ""
-echo "JDCR analysis folders:"
-echo "  logs/jaadcr_evaluated/analysis_1.5-4b-it_without_options/"
-echo "  logs/jaadcr_evaluated/analysis_1.5-4b-it_with_options/"
-echo "  logs/jaadcr_evaluated/analysis_27b-it_without_options/"
-echo "  logs/jaadcr_evaluated/analysis_27b-it_with_options/"
-echo "  logs/jaadcr_evaluated/analysis_4b-it_without_options/"
-echo "  logs/jaadcr_evaluated/analysis_4b-it_with_options/"
+echo "To check results:"
+echo "  ls $OUT/*.csv    # 36 CSV files (3 per run x 12 runs)"
+echo "  ls $OUT/*.png    # 48 plot files (4 per run x 12 runs)"
+echo "  ls $OUT/*.html   # 12 HTML reports"

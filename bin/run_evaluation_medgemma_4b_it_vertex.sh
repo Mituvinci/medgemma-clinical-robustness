@@ -111,7 +111,7 @@ echo "========================================================================"
 echo "  RUN 3/4: MedGemma-4B-IT (Vertex AI) + without options"
 echo "========================================================================"
 echo "Started: $(date)"
-python JAADCR/new/stage_3_evaluate_jdcr.py \
+python scripts/evaluate_jdcr_cases.py \
     --input JAADCR/jaadcr_input \
     --agent-model medgemma-4b-it-vertex \
     --resume \
@@ -126,7 +126,7 @@ echo "========================================================================"
 echo "  RUN 4/4: MedGemma-4B-IT (Vertex AI) + with options (MCQ)"
 echo "========================================================================"
 echo "Started: $(date)"
-python JAADCR/new/stage_3_evaluate_jdcr.py \
+python scripts/evaluate_jdcr_cases.py \
     --input JAADCR/jaadcr_input_with_options \
     --agent-model medgemma-4b-it-vertex \
     --resume \

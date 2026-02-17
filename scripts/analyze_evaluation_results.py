@@ -126,6 +126,8 @@ class EvaluationAnalyzer:
             diag = re.sub(r'\*', '', diag)    # remove italic markdown
             diag = re.sub(r'^\s*[*\-•]\s*', '', diag)  # remove leading bullets
             diag = re.sub(r'^\s*\d+[.)]\s*', '', diag)  # remove leading numbers
+            # Remove MCQ option letter prefix: A) B) (A) (B) A. B. A B etc.
+            diag = re.sub(r'^\(?[A-Ea-e]\)?\s*[.):]?\s*', '', diag)
             # Remove trailing confidence text
             diag = re.sub(r'\s*[-–]\s*Confidence.*$', '', diag, flags=re.IGNORECASE)
             diag = re.sub(r'\s*\(Confidence[^)]*\)\s*$', '', diag, flags=re.IGNORECASE)
@@ -184,6 +186,7 @@ class EvaluationAnalyzer:
             diag = re.sub(r'\*', '', diag)
             diag = re.sub(r'^\s*[*\-•]\s*', '', diag)
             diag = re.sub(r'^\s*\d+[.)]\s*', '', diag)
+            diag = re.sub(r'^\(?[A-Ea-e]\)?\s*[.):]?\s*', '', diag)  # strip MCQ option prefix
             diag = re.sub(r'\s*[-–]\s*Confidence.*$', '', diag, flags=re.IGNORECASE)
             diag = re.sub(r'\s*\(Confidence[^)]*\)\s*$', '', diag, flags=re.IGNORECASE)
             diag = diag.rstrip(':').strip()
@@ -211,22 +214,37 @@ class EvaluationAnalyzer:
         # Pattern: **Diagnosis Name** - Confidence: 0.XX or (Confidence: 0.XX)
         # These appear after "Differential Diagnos" section
         diff_section = re.search(
-            r'Differential Diagnos[ei]s.*?(?=###|\Z)',
+            r'Differential Diagnos[ei]s.*?(?=###\s*Plan|##\s*Plan|\*\*P[:\s]|### P\b|\Z)',
             response_text, re.IGNORECASE | re.DOTALL
         )
         if diff_section:
             section_text = diff_section.group(0)
-            # Find each differential: bold text that looks like a diagnosis
-            diff_pattern = r'(?:\*\*|^)\s*(?:\d+[.)]\s*)?(?:\*\*)?([A-Z][^*\n]{3,80}?)(?:\*\*)\s*'
-            for m in re.finditer(diff_pattern, section_text, re.MULTILINE):
+            # Find each differential: numbered bold text with confidence score nearby
+            # Pattern: 1. **Diagnosis Name** or *  **Diagnosis Name**
+            diff_pattern = r'(?:^|\n)\s*(?:\d+[.)]\s+|\*\s+)\*\*([A-Z][^*\n]{3,80}?)\*\*'
+            for m in re.finditer(diff_pattern, section_text):
                 diag = _clean(m.group(1))
-                if diag and diag.lower() not in ('evidence', 'rationale', 'supporting evidence',
-                                                   'confidence', 'confidence score', 'plan',
-                                                   'differential diagnoses', 'differential diagnosis'):
+                # Skip section headers and non-diagnosis text
+                skip_words = {
+                    'evidence', 'rationale', 'supporting evidence', 'confidence',
+                    'confidence score', 'plan', 'differential diagnoses',
+                    'differential diagnosis', 'relevant guidelines', 'soap note',
+                    'subjective', 'objective', 'assessment', 'diagnostic',
+                    'treatment', 'follow-up', 'citations', 'reasoning',
+                    'key diagnostic criteria', 'clinical features',
+                    'summary', 'recommendations', 'patient', 'case id',
+                    'primary diagnosis', 'specific citations', 'monitoring',
+                    'referral', 'diagnostic tests', 'medication review',
+                    'final diagnosis', 'p: plan',
+                }
+                if diag and diag.lower() not in skip_words and len(diag) > 3:
                     conf = _extract_confidence(section_text[m.start():m.start()+300])
                     # Avoid duplicating primary
                     if not any(self.fuzzy_match(diag, d[0], 0.85) for d in diagnoses):
                         diagnoses.append((diag, conf))
+                        # Limit to 4 differentials max
+                        if len(diagnoses) >= 5:
+                            break
 
         return diagnoses
 
@@ -739,9 +757,18 @@ class EvaluationAnalyzer:
             else:
                 all_diags = self.extract_all_diagnoses(response_text)
                 pred = all_diags[0][0] if all_diags else "Unknown"
-                diagnosis_cell = pred if pred != "Unknown" else response_text[:200] if response_text else "Unknown"
+                if pred != "Unknown":
+                    diagnosis_cell = pred
+                elif 'SOAP' in response_text or 'Assessment' in response_text:
+                    # Has SOAP structure but regex couldn't extract — show first 200 chars
+                    diagnosis_cell = response_text[:200]
+                elif response_text:
+                    # Response exists but no SOAP note (incomplete workflow)
+                    diagnosis_cell = "INCOMPLETE (no SOAP)"
+                else:
+                    diagnosis_cell = "Unknown"
                 # Format all diagnoses as numbered list
-                all_diag_cell = " | ".join(f"{i+1}. {d[0]}" for i, d in enumerate(all_diags)) if all_diags else "Unknown"
+                all_diag_cell = " | ".join(f"{i+1}. {d[0]}" for i, d in enumerate(all_diags)) if all_diags else diagnosis_cell
 
             cases[case_num][variant] = {
                 'diagnosis': diagnosis_cell,

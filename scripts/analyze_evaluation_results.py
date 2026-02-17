@@ -126,8 +126,9 @@ class EvaluationAnalyzer:
             diag = re.sub(r'\*', '', diag)    # remove italic markdown
             diag = re.sub(r'^\s*[*\-•]\s*', '', diag)  # remove leading bullets
             diag = re.sub(r'^\s*\d+[.)]\s*', '', diag)  # remove leading numbers
-            # Remove MCQ option letter prefix: A) B) (A) (B) A. B. A B etc.
-            diag = re.sub(r'^\(?[A-Ea-e]\)?\s*[.):]?\s*', '', diag)
+            # Remove MCQ option letter prefix: A) B) (A) (B) A. B. etc.
+            # Requires delimiter after letter to avoid eating first char of diagnosis
+            diag = re.sub(r'^\(?[A-Ea-e][.):\)]\s*', '', diag)
             # Remove trailing confidence text
             diag = re.sub(r'\s*[-–]\s*Confidence.*$', '', diag, flags=re.IGNORECASE)
             diag = re.sub(r'\s*\(Confidence[^)]*\)\s*$', '', diag, flags=re.IGNORECASE)
@@ -154,8 +155,26 @@ class EvaluationAnalyzer:
                 confidence = _extract_confidence(response_text[match.start():match.start()+500])
                 return diagnosis, confidence
 
-        # Pattern 3: Assessment section - look for first bold diagnosis name
-        pattern3 = r'Assessment \(A\):.*?\n.*?\*\*([^*\n]+)\*\*'
+        # Pattern 2b: Most Likely / Final / Presumptive Diagnosis (bold)
+        pattern2b = r'\*\*(?:Most Likely|Final|Presumptive)\s+Diagnosis:\*\*\s*(?:\n\s*[*\-1-9.]*\s*)?(?:\*\*)?(.+?)(?:\*\*)?(?:\s*[-–]\s*Confidence|\s*\(Confidence|\n|$)'
+        match = re.search(pattern2b, response_text, re.IGNORECASE)
+        if match:
+            diagnosis = _clean(match.group(1))
+            if diagnosis and diagnosis.lower() != 'unknown':
+                confidence = _extract_confidence(response_text[match.start():match.start()+500])
+                return diagnosis, confidence
+
+        # Pattern 2c: Most Likely / Final / Presumptive Diagnosis (no bold)
+        pattern2c = r'(?:Most Likely|Final|Presumptive)\s+Diagnosis:\s*(?:\n\s*[*\-1-9.]*\s*)?(.+?)(?:\s*[-–]\s*Confidence|\s*\(Confidence|\n|$)'
+        match = re.search(pattern2c, response_text, re.IGNORECASE)
+        if match:
+            diagnosis = _clean(match.group(1))
+            if diagnosis and diagnosis.lower() != 'unknown':
+                confidence = _extract_confidence(response_text[match.start():match.start()+500])
+                return diagnosis, confidence
+
+        # Pattern 3: Assessment section - look for first bold diagnosis (allow up to 3 intervening lines)
+        pattern3 = r'Assessment \(A\):[^\n]*\n(?:[^\n]*\n){0,3}?\*\*([^*\n]+)\*\*'
         match = re.search(pattern3, response_text, re.IGNORECASE | re.DOTALL)
         if match:
             diagnosis = _clean(match.group(1))
@@ -167,6 +186,14 @@ class EvaluationAnalyzer:
         match = re.search(pattern4, response_text, re.IGNORECASE | re.DOTALL)
         if match:
             return match.group(1).strip(), 0.3
+
+        # Pattern 5: "Conclusion" section with bold diagnosis
+        pattern5 = r'\*\*Conclusion\*\*:?\s*.*?(?:most likely|diagnosis is)\s*\*\*([^*\n]+)\*\*'
+        match = re.search(pattern5, response_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            diagnosis = _clean(match.group(1))
+            if diagnosis:
+                return diagnosis, 0.3
 
         # No diagnosis found
         return "Unknown", 0.0
@@ -186,7 +213,9 @@ class EvaluationAnalyzer:
             diag = re.sub(r'\*', '', diag)
             diag = re.sub(r'^\s*[*\-•]\s*', '', diag)
             diag = re.sub(r'^\s*\d+[.)]\s*', '', diag)
-            diag = re.sub(r'^\(?[A-Ea-e]\)?\s*[.):]?\s*', '', diag)  # strip MCQ option prefix
+            # Remove MCQ option letter prefix: A) B) (A) (B) A. B. etc.
+            # Requires delimiter after letter to avoid eating first char of diagnosis
+            diag = re.sub(r'^\(?[A-Ea-e][.):\)]\s*', '', diag)
             diag = re.sub(r'\s*[-–]\s*Confidence.*$', '', diag, flags=re.IGNORECASE)
             diag = re.sub(r'\s*\(Confidence[^)]*\)\s*$', '', diag, flags=re.IGNORECASE)
             diag = diag.rstrip(':').strip()
@@ -236,6 +265,15 @@ class EvaluationAnalyzer:
                     'primary diagnosis', 'specific citations', 'monitoring',
                     'referral', 'diagnostic tests', 'medication review',
                     'final diagnosis', 'p: plan',
+                    # SOAP section headers that slip through
+                    'justification', 'onset after vaccination', 'morphology',
+                    'distribution', 'symptoms', 'skin', 'imaging',
+                    'biopsy', 'biopsy findings', 'laboratory findings',
+                    'cultures', 'physical examination', 'chief complaint',
+                    'history of present illness', 'past medical history',
+                    'family history', 'detailed physical examination',
+                    'cutaneous examination', 'patient age',
+                    'duration of symptoms', 'confidence score',
                 }
                 if diag and diag.lower() not in skip_words and len(diag) > 3:
                     conf = _extract_confidence(section_text[m.start():m.start()+300])

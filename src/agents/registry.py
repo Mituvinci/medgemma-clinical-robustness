@@ -89,8 +89,8 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "requires": "GOOGLE_APPLICATION_CREDENTIALS",
         "model_id": "medgemma-1.5-4b-it",
         "project_id": settings.google_cloud_project,
-        "region": "us-east4",
-        "endpoint_id": "mg-endpoint-aadfd050-433b-44cb-ab84-d72ee01e0a6a",
+        "region": "us-central1",
+        "endpoint_id": "mg-endpoint-93c8daf1-a210-4e48-8d93-297bd5256165",
         "strengths": [
             "Medical knowledge",
             "Fast inference (4B params)",

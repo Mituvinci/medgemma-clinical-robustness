@@ -50,14 +50,11 @@ logger = logging.getLogger(__name__)
 # Each case uses ~10 API calls. cases_limit = conservative RPD / 10.
 # Ordered DESCENDING by RPD: highest-quota models first to maximize throughput.
 ORCHESTRATOR_FALLBACK_MODELS = [
-    {"name": "gemini-flash-latest",         "rpd": 1000, "cases_limit": 100},
-    {"name": "gemini-2.0-flash",            "rpd": 1000, "cases_limit": 100},
-    {"name": "gemini-2.5-flash",            "rpd": 250,  "cases_limit": 25},
-    {"name": "gemini-2.5-flash-preview",    "rpd": 250,  "cases_limit": 25},
-    {"name": "gemini-2.5-pro",              "rpd": 50,   "cases_limit": 5},
-    {"name": "gemini-pro-latest",           "rpd": 50,   "cases_limit": 5},
-    {"name": "gemini-3-flash-preview",      "rpd": 20,   "cases_limit": 2},
-    {"name": "gemini-3-pro-preview",        "rpd": 10,   "cases_limit": 1},
+    {"name": "gemini-flash-latest",  "rpd": 1000, "cases_limit": 500},
+    {"name": "gemini-2.0-flash",     "rpd": 1000, "cases_limit": 500},
+    {"name": "gemini-1.5-flash",     "rpd": 1000, "cases_limit": 500},
+    {"name": "gemini-pro-latest",    "rpd": 50,   "cases_limit": 25},
+    {"name": "gemini-1.5-pro",       "rpd": 50,   "cases_limit": 25},
 ]
 
 
@@ -68,7 +65,7 @@ class JDCREvaluator:
     COUNTER_FILE = "logs/.orchestrator_counter_jdcr.json"
 
     # HTTP status codes that mean "try another model"
-    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    RETRYABLE_STATUS_CODES = {404, 429, 500, 502, 503, 504}
 
     def __init__(self, model_name: str = "gemini-flash-latest", agent_model: str = "medgemma",
                  start_model_index: int = None):
@@ -281,8 +278,14 @@ class JDCREvaluator:
                 error_str = str(e)
                 http_status = self._extract_http_status(error_str)
 
-                if http_status in self.RETRYABLE_STATUS_CODES:
-                    logger.warning(f"  HTTP {http_status} for orchestrator '{self.model_name}' on {case_id}")
+                # Retry on HTTP quota/server errors OR JSON parse errors.
+                # JSON parse errors occur when MedGemma outputs backslashes in
+                # medical notation (e.g. \alpha, \mu). A fresh generation avoids them.
+                is_json_error = "Invalid \\escape" in error_str or "JSONDecodeError" in error_str
+
+                if http_status in self.RETRYABLE_STATUS_CODES or is_json_error:
+                    reason = f"HTTP {http_status}" if http_status else "JSON parse error"
+                    logger.warning(f"  {reason} for orchestrator '{self.model_name}' on {case_id} — retrying")
                     if self._switch_to_next_model():
                         logger.info(f"  Retrying {case_id} with new orchestrator: {self.model_name}")
                         time.sleep(5)

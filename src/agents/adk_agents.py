@@ -45,6 +45,7 @@ MedGemma-27B-IT is the specialist physician.
 
 import logging
 import os
+import re
 from typing import Dict, Any, List, Optional
 
 # Disable ADK telemetry to avoid JSON serialization issues with bytes
@@ -78,6 +79,22 @@ from src.agents.conversation_manager import get_conversation_manager
 from config.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_response(text: str) -> str:
+    """
+    Sanitize MedGemma response to prevent JSON serialization errors.
+
+    MedGemma occasionally outputs backslashes in medical/scientific notation
+    (e.g., \\alpha, \\beta, \\mu) that are not valid JSON escape sequences.
+    When ADK packages the tool response as JSON to pass back to Gemini,
+    these invalid escapes cause JSONDecodeError. This function replaces them
+    with safe double-backslash equivalents before the response is returned.
+
+    Valid JSON escape characters: \" \\ \/ \\b \\f \\n \\r \\t \\uXXXX
+    Everything else (e.g., \\a, \\p, \\m) is invalid and replaced.
+    """
+    return re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
 
 
 # ============================================================================
@@ -326,8 +343,9 @@ Provide your analysis as a structured response."""
         response = specialist.generate(
             prompt=prompt,
             max_tokens=1000,  # Increased for detailed completeness analysis
-            temperature=0.3
+            temperature=0.0
         )
+        response = _sanitize_response(response)
 
         return {
             "medgemma_analysis": response,
@@ -390,8 +408,9 @@ Provide a structured synthesis focusing on differential diagnosis support."""
         response = specialist.generate(
             prompt=prompt,
             max_tokens=2000,  # Increased for comprehensive guideline synthesis
-            temperature=0.4
+            temperature=0.0
         )
+        response = _sanitize_response(response)
 
         return {
             "medgemma_synthesis": response,
@@ -475,8 +494,9 @@ Format your response as a structured SOAP note with clear section headers."""
         response = specialist.generate(
             prompt=prompt,
             max_tokens=3000,  # Increased for complete SOAP note with extensive differentials
-            temperature=0.3
+            temperature=0.0
         )
+        response = _sanitize_response(response)
 
         return {
             "soap_note": response,
@@ -640,7 +660,7 @@ Your role is ORCHESTRATION, not clinical diagnosis.
 
 Workflow:
 1. Receive case data and research context from the coordinator
-2. MUST use medgemma_clinical_diagnosis tool to generate the SOAP note
+2. MUST use medgemma_clinical_diagnosis tool to generate the SOAP note — call it EXACTLY ONCE
 3. Return MedGemma specialist's complete assessment
 
 CRITICAL RULE: You are NOT the diagnostician.
@@ -649,6 +669,7 @@ You MUST delegate ALL clinical reasoning to this tool.
 
 DO NOT attempt to write the SOAP note yourself.
 DO NOT make clinical judgments.
+DO NOT call medgemma_clinical_diagnosis more than once — ONE call only, then output the result.
 Your job is to orchestrate the workflow and pass data to the MedGemma specialist.
 
 Expected output:
@@ -658,6 +679,7 @@ Expected output:
 - Treatment recommendations
 
 Simply pass through the MedGemma specialist's output without modification.
+After receiving the tool result, output it as your FINAL response and stop.
 """,
         tools=[FunctionTool(medgemma_clinical_diagnosis)],
         output_schema=None
@@ -893,12 +915,18 @@ class MedGemmaWorkflow:
         response_text = ""
         agent_steps = []  # Track each agent's response
         current_agent = None
+        step_count = 0
+        MAX_STEPS = 60  # Safety cap — normal case uses ~10-15 steps; prevents infinite tool-call loops
 
         async for event in self.runner.run_async(
             user_id=user_id,
             session_id=adk_session_id,
             new_message=content
         ):
+            step_count += 1
+            if step_count > MAX_STEPS:
+                logger.warning(f"MAX_STEPS ({MAX_STEPS}) exceeded for {adk_session_id} — breaking to prevent infinite loop")
+                break
             # Try to identify which agent is responding
             if hasattr(event, 'agent_name'):
                 current_agent = event.agent_name

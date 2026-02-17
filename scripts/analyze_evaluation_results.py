@@ -280,37 +280,96 @@ class EvaluationAnalyzer:
                     # Avoid duplicating primary
                     if not any(self.fuzzy_match(diag, d[0], 0.85) for d in diagnoses):
                         diagnoses.append((diag, conf))
-                        # Limit to 4 differentials max
-                        if len(diagnoses) >= 5:
-                            break
+                        # No hard cap — collect ALL differentials for any-rank scoring
 
         return diagnoses
 
+    @staticmethod
+    def _extract_keywords(text: str) -> set:
+        """
+        Extract meaningful keywords from a diagnosis string.
+
+        Lowercases the text, splits on whitespace and punctuation,
+        removes common stopwords and single-character tokens.
+
+        Examples:
+            "IgA vasculitis"                  → {"iga", "vasculitis"}
+            "Pemphigoid gestationis (PG)"     → {"pemphigoid", "gestationis", "pg"}
+            "a-1 antitrypsin deficiency"      → {"antitrypsin", "deficiency"}
+            "Chronic bullous dermatosis of childhood" → {"chronic", "bullous", "dermatosis", "childhood"}
+        """
+        STOPWORDS = {
+            'a', 'an', 'the', 'of', 'in', 'with', 'and', 'or', 'for',
+            'to', 'by', 'as', 'at', 'from', 'on', 'is', 'was', 'are',
+            'en', 'de', 'vs', 'due', 'type', 'stage',
+        }
+        tokens = re.split(r'[\s\-\(\)/,\.;:]+', text.lower())
+        keywords = set()
+        for t in tokens:
+            t = t.strip()
+            # Keep if: non-empty, not a stopword, length >= 2
+            if t and t not in STOPWORDS and len(t) >= 2:
+                keywords.add(t)
+        return keywords
+
+    def keyword_match(self, pred: str, true: str) -> bool:
+        """
+        Returns True if ANY meaningful keyword from the ground truth
+        appears anywhere in the prediction (case-insensitive).
+
+        This handles cases like:
+          GT:   "IgA vasculitis"
+          Pred: "Urticarial Vasculitis"
+          → "vasculitis" keyword found in pred → True
+
+          GT:   "Pemphigoid gestationis (PG)"
+          Pred: "Pemphigoid Gestationis (PG): Confidence 0.98"
+          → "pemphigoid" found → True
+
+          GT:   "a-1 antitrypsin deficiency (AATD) panniculitis"
+          Pred: "Alpha-1 Antitrypsin Deficiency-Associated Panniculitis"
+          → "antitrypsin" found → True
+        """
+        keywords = self._extract_keywords(true)
+        if not keywords:
+            return False
+        pred_lower = pred.lower()
+        return any(kw in pred_lower for kw in keywords)
+
     def fuzzy_match(self, pred: str, true: str, threshold: float = 0.7) -> bool:
         """
-        Fuzzy match two diagnosis strings.
+        Match two diagnosis strings using exact, substring, keyword, or fuzzy similarity.
+
+        Matching priority (any one is sufficient):
+          1. Exact match (case-insensitive)
+          2. One string is a substring of the other
+          3. Keyword match: any meaningful word from ground truth found in prediction
+          4. SequenceMatcher similarity >= threshold
 
         Args:
             pred: Predicted diagnosis
             true: Ground truth diagnosis
-            threshold: Similarity threshold (0-1)
+            threshold: Similarity threshold for SequenceMatcher fallback (0-1)
 
         Returns:
-            True if match, False otherwise
+            True if any match criterion is satisfied
         """
-        # Normalize both strings
         pred_norm = pred.lower().strip()
         true_norm = true.lower().strip()
 
-        # Exact match
+        # 1. Exact match
         if pred_norm == true_norm:
             return True
 
-        # Check if one is substring of other
+        # 2. Substring match
         if pred_norm in true_norm or true_norm in pred_norm:
             return True
 
-        # Fuzzy similarity
+        # 3. Keyword match — at least one meaningful word from GT appears in pred
+        if self.keyword_match(pred_norm, true_norm):
+            return True
+
+        # 4. Fuzzy similarity fallback
         similarity = SequenceMatcher(None, pred_norm, true_norm).ratio()
         return similarity >= threshold
 
@@ -336,6 +395,7 @@ class EvaluationAnalyzer:
                 'correct': 0,
                 'top3_correct': 0,
                 'top4_correct': 0,
+                'any_rank_correct': 0,
                 'paused': 0,
                 'errors': 0,
                 'avg_confidence': 0.0,
@@ -361,18 +421,29 @@ class EvaluationAnalyzer:
             response_text = result.get('response_text', '')
             pred_diagnosis, confidence = self.extract_diagnosis(response_text)
 
-            # Check if correct (Top-1)
-            is_correct = self.fuzzy_match(pred_diagnosis, true_diagnosis)
-
-            # Extract all diagnoses for Top-3 and Top-4 accuracy
-            all_diagnoses = self.extract_all_diagnoses(response_text)
-            top3_diagnoses = all_diagnoses[:3]
-            top4_diagnoses = all_diagnoses[:4]
-            is_top3_correct = any(self.fuzzy_match(d[0], true_diagnosis) for d in top3_diagnoses)
-            is_top4_correct = any(self.fuzzy_match(d[0], true_diagnosis) for d in top4_diagnoses)
-
-            # Metrics
+            # Metrics — get paused BEFORE accuracy checks
             paused = result.get('agentic_pause_triggered', False)
+
+            # Accuracy: paused cases are NEVER correct — even if keywords accidentally match
+            # in the triage response text. A paused case = no diagnosis attempt = not correct.
+            if paused:
+                is_correct = False
+                is_top3_correct = False
+                is_top4_correct = False
+                is_any_rank_correct = False
+                all_diagnoses = []
+            else:
+                # Check if correct (Top-1)
+                is_correct = self.fuzzy_match(pred_diagnosis, true_diagnosis)
+
+                # Extract ALL diagnoses (no cap) for Top-3, Top-4, and Any-rank accuracy
+                all_diagnoses = self.extract_all_diagnoses(response_text)
+                top3_diagnoses = all_diagnoses[:3]
+                top4_diagnoses = all_diagnoses[:4]
+                is_top3_correct = any(self.fuzzy_match(d[0], true_diagnosis) for d in top3_diagnoses)
+                is_top4_correct = any(self.fuzzy_match(d[0], true_diagnosis) for d in top4_diagnoses)
+                # Any-rank: correct answer appears ANYWHERE in the full differential list
+                is_any_rank_correct = any(self.fuzzy_match(d[0], true_diagnosis) for d in all_diagnoses)
             error = result.get('error') is not None
             exec_time = result.get('execution_time_ms', 0)
 
@@ -386,6 +457,8 @@ class EvaluationAnalyzer:
                     var_metrics['top3_correct'] += 1
                 if is_top4_correct:
                     var_metrics['top4_correct'] += 1
+                if is_any_rank_correct:
+                    var_metrics['any_rank_correct'] += 1
                 if paused:
                     var_metrics['paused'] += 1
                 if error:
@@ -400,6 +473,8 @@ class EvaluationAnalyzer:
                     'correct': is_correct,
                     'top3_correct': is_top3_correct,
                     'top4_correct': is_top4_correct,
+                    'any_rank_correct': is_any_rank_correct,
+                    'num_diagnoses': len(all_diagnoses),
                     'confidence': confidence,
                     'paused': paused
                 })
@@ -410,10 +485,12 @@ class EvaluationAnalyzer:
                 'variant': variant,
                 'predicted_diagnosis': pred_diagnosis,
                 'all_diagnoses': [d[0] for d in all_diagnoses],
+                'num_diagnoses': len(all_diagnoses),
                 'true_diagnosis': true_diagnosis,
                 'correct': is_correct,
                 'top3_correct': is_top3_correct,
                 'top4_correct': is_top4_correct,
+                'any_rank_correct': is_any_rank_correct,
                 'confidence': confidence,
                 'paused': paused,
                 'error': error,
@@ -426,6 +503,7 @@ class EvaluationAnalyzer:
                 data['accuracy'] = data['correct'] / data['total']
                 data['top3_accuracy'] = data['top3_correct'] / data['total']
                 data['top4_accuracy'] = data['top4_correct'] / data['total']
+                data['any_rank_accuracy'] = data['any_rank_correct'] / data['total']
                 data['pause_rate'] = data['paused'] / data['total']
                 data['error_rate'] = data['errors'] / data['total']
                 data['avg_confidence'] /= data['total']
@@ -439,6 +517,7 @@ class EvaluationAnalyzer:
                 'overall_accuracy': sum(1 for r in metrics['detailed_results'] if r['correct']) / total_cases,
                 'overall_top3_accuracy': sum(1 for r in metrics['detailed_results'] if r['top3_correct']) / total_cases,
                 'overall_top4_accuracy': sum(1 for r in metrics['detailed_results'] if r['top4_correct']) / total_cases,
+                'overall_any_rank_accuracy': sum(1 for r in metrics['detailed_results'] if r['any_rank_correct']) / total_cases,
                 'overall_pause_rate': sum(1 for r in metrics['detailed_results'] if r['paused']) / total_cases,
                 'overall_error_rate': sum(1 for r in metrics['detailed_results'] if r['error']) / total_cases,
                 'avg_confidence': sum(r['confidence'] for r in metrics['detailed_results']) / total_cases,
@@ -460,6 +539,7 @@ class EvaluationAnalyzer:
                 'Top-1 Acc (%)': f"{data['accuracy']*100:.1f}",
                 'Top-3 Acc (%)': f"{data['top3_accuracy']*100:.1f}",
                 'Top-4 Acc (%)': f"{data['top4_accuracy']*100:.1f}",
+                'Any-Rank Acc (%)': f"{data['any_rank_accuracy']*100:.1f}",
                 'Pause Rate (%)': f"{data['pause_rate']*100:.1f}",
                 'Avg Confidence': f"{data['avg_confidence']:.2f}",
                 'Avg Time (s)': f"{data['avg_execution_time_ms']/1000:.1f}",
@@ -493,29 +573,31 @@ class EvaluationAnalyzer:
 
         variants = list(metrics['by_variant'].keys())
 
-        # Plot 1: Accuracy by Variant (Top-1, Top-3, Top-4 grouped bars)
-        fig, ax = plt.subplots(figsize=(12, 7))
+        # Plot 1: Accuracy by Variant (Top-1, Top-3, Top-4, Any-Rank grouped bars)
+        fig, ax = plt.subplots(figsize=(14, 7))
         top1_accs = [metrics['by_variant'][v]['accuracy'] * 100 for v in variants]
         top3_accs = [metrics['by_variant'][v]['top3_accuracy'] * 100 for v in variants]
         top4_accs = [metrics['by_variant'][v]['top4_accuracy'] * 100 for v in variants]
+        any_rank_accs = [metrics['by_variant'][v]['any_rank_accuracy'] * 100 for v in variants]
 
         x = np.arange(len(variants))
-        width = 0.25
+        width = 0.2
 
-        bars1 = ax.bar(x - width, top1_accs, width, label='Top-1', alpha=0.8, color='#e74c3c', edgecolor='black')
-        bars2 = ax.bar(x, top3_accs, width, label='Top-3', alpha=0.8, color='#f39c12', edgecolor='black')
-        bars3 = ax.bar(x + width, top4_accs, width, label='Top-4', alpha=0.8, color='#27ae60', edgecolor='black')
+        bars1 = ax.bar(x - 1.5*width, top1_accs, width, label='Top-1', alpha=0.8, color='#e74c3c', edgecolor='black')
+        bars2 = ax.bar(x - 0.5*width, top3_accs, width, label='Top-3', alpha=0.8, color='#f39c12', edgecolor='black')
+        bars3 = ax.bar(x + 0.5*width, top4_accs, width, label='Top-4', alpha=0.8, color='#27ae60', edgecolor='black')
+        bars4 = ax.bar(x + 1.5*width, any_rank_accs, width, label='Any-Rank', alpha=0.8, color='#8e44ad', edgecolor='black')
 
         ax.set_xlabel('Context Variant', fontsize=12, fontweight='bold')
         ax.set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Diagnostic Accuracy by Context Variant (Top-1 / Top-3 / Top-4)', fontsize=14, fontweight='bold')
-        ax.set_ylim(0, 100)
+        ax.set_title('Diagnostic Accuracy by Context Variant (Top-1 / Top-3 / Top-4 / Any-Rank)', fontsize=14, fontweight='bold')
+        ax.set_ylim(0, 110)
         ax.set_xticks(x)
         ax.set_xticklabels(variants, rotation=45, ha='right')
         ax.legend(fontsize=11)
         ax.grid(axis='y', alpha=0.3)
 
-        for bar_group in [bars1, bars2, bars3]:
+        for bar_group in [bars1, bars2, bars3, bars4]:
             for bar in bar_group:
                 height = bar.get_height()
                 if height > 0:
@@ -905,6 +987,7 @@ def main():
     print(f"  Top-1 Accuracy:    {metrics['overall']['overall_accuracy']*100:.1f}%")
     print(f"  Top-3 Accuracy:    {metrics['overall']['overall_top3_accuracy']*100:.1f}%")
     print(f"  Top-4 Accuracy:    {metrics['overall']['overall_top4_accuracy']*100:.1f}%")
+    print(f"  Any-Rank Accuracy: {metrics['overall']['overall_any_rank_accuracy']*100:.1f}%")
     print(f"  Pause Rate:        {metrics['overall']['overall_pause_rate']*100:.1f}%")
     print(f"  Avg Confidence:    {metrics['overall']['avg_confidence']:.2f}")
     print()

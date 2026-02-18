@@ -57,10 +57,27 @@ echo "  NEJM EVALUATIONS (6 runs)"
 echo "========================================================================"
 
 # --- NEJM: MedGemma-1.5-4B-IT ---
+# Auto-picks the LATEST result file from the rerun dir (if it exists) else falls back to original.
+NEJM_1P5_NO_OPTS=$(ls -t logs/nejm_rerun_1.5_4b/without_options/nejim_evaluation_*.json 2>/dev/null | head -1)
+if [ -z "$NEJM_1P5_NO_OPTS" ]; then
+    NEJM_1P5_NO_OPTS="logs/nejm_evaluated/evaluation_medgemma-1.5-4b-it_without_options/nejim_evaluation_20260212_000001.json"
+    echo "  [NOTE] Using OLD results (pre-image-fix). Run bin/rerun_nejm_1.5_4b_vertex.sh for fresh results."
+else
+    echo "  [RERUN] Using fresh results: $NEJM_1P5_NO_OPTS"
+fi
+
+NEJM_1P5_W_OPTS=$(ls -t logs/nejm_rerun_1.5_4b/with_options/nejim_evaluation_*.json 2>/dev/null | head -1)
+if [ -z "$NEJM_1P5_W_OPTS" ]; then
+    NEJM_1P5_W_OPTS="logs/nejm_evaluated/evaluation_medgemma-1.5-4b-it_with_options/nejim_evaluation_20260211_235104.json"
+    echo "  [NOTE] Using OLD results (pre-image-fix). Run bin/rerun_nejm_1.5_4b_vertex.sh for fresh results."
+else
+    echo "  [RERUN] Using fresh results: $NEJM_1P5_W_OPTS"
+fi
+
 echo ""
 echo "--- [1/12] NEJM: MedGemma-1.5-4B-IT WITHOUT options ---"
 python "$SCRIPT" \
-    --results logs/nejm_evaluated/evaluation_medgemma-1.5-4b-it_without_options/nejim_evaluation_20260212_000001.json \
+    --results "$NEJM_1P5_NO_OPTS" \
     --groundtruth "$NEJM_GT" \
     --output-dir "$OUT" \
     --prefix nejm_medgemma-1.5-4b-it_without_options
@@ -68,7 +85,7 @@ python "$SCRIPT" \
 echo ""
 echo "--- [2/12] NEJM: MedGemma-1.5-4B-IT WITH options ---"
 python "$SCRIPT" \
-    --results logs/nejm_evaluated/evaluation_medgemma-1.5-4b-it_with_options/nejim_evaluation_20260211_235104.json \
+    --results "$NEJM_1P5_W_OPTS" \
     --groundtruth "$NEJM_GT" \
     --output-dir "$OUT" \
     --prefix nejm_medgemma-1.5-4b-it_with_options
@@ -170,6 +187,14 @@ echo "========================================================================"
 echo ""
 
 python scripts/generate_summary_table.py --analysis-dir "$OUT"
+
+echo ""
+echo "========================================================================"
+echo "  Generating Consolidated Comparison Plots (6 plots)"
+echo "========================================================================"
+echo ""
+
+python scripts/generate_consolidated_plots.py --analysis-dir "$OUT"
 
 echo ""
 echo "========================================================================"

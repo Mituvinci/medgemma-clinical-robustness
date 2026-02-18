@@ -1,8 +1,37 @@
 """
-Model Registry
+Model Registry — Central registry for all LLM models used in this project.
 
-Central registry for all available LLM models.
-Maps model names to their adapters and requirements.
+Maps short model names (used in CLI args and config) to their adapter classes,
+provider configuration, and capability metadata.
+
+Registry Schema (each entry in MODEL_REGISTRY):
+─────────────────────────────────────────────────
+  adapter      : (required) Adapter class implementing the BaseLLMAdapter interface.
+                 Located in src/agents/models/. Wraps model-specific API calls.
+  status       : (required) "active" — fully configured and ready to use.
+                             "stub"   — adapter exists but API key not provided.
+  description  : Human-readable model description (shown in UI and logs).
+  provider     : API provider: "huggingface", "vertex_ai", "google", "openai", "anthropic".
+  requires     : Environment variable that must be set to use this model.
+  model_id     : Provider-specific model identifier passed to the adapter.
+
+  HuggingFace-only fields:
+    (none — model_id is the HF repo path, e.g. "google/medgemma-27b-it")
+
+  Vertex AI-only fields:
+    project_id  : Google Cloud project ID (from settings.google_cloud_project)
+    region      : Vertex AI region (e.g., "us-central1")
+    endpoint_id : Deployed Vertex AI endpoint ID for the model
+
+  strengths   : List of model capability highlights (shown in UI).
+  use_cases   : List of recommended use cases (shown in UI).
+  message     : (stub only) Instruction for how to enable the model.
+
+Architecture note:
+    In this system, MedGemma models (27B, 4B, 1.5-4B-IT) perform ALL clinical
+    reasoning. The Gemini/Google models act only as workflow orchestrators in
+    Google ADK — they do NOT perform medical diagnosis. See adk_agents.py for
+    the full multi-agent design.
 """
 
 from typing import Dict, Any, List

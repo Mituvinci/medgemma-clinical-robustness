@@ -57,6 +57,15 @@ The workflow **pauses** -- no diagnosis attempted. This is the core safety behav
 - NEJM Image Challenge: 25 challenging dermatology cases (out-of-domain)
 - JAADCR Case Reports: 25 open access (CC BY-NC-ND 4.0) domain-matched cases with ground truth extracted via Gemini API. See [JAADCR_EVALUATION_CASES.md](JAADCR_EVALUATION_CASES.md) for full case list with source URLs.
 
+**Dataset Usage and Copyright Notice**:
+
+| Dataset | License | Usage in this project |
+|---------|---------|----------------------|
+| **NEJM Image Challenge** | © NEJM, all rights reserved | Evaluation ONLY. 25 publicly available cases used to measure diagnostic accuracy against published ground truths. Data is NOT included in the RAG knowledge base and is NOT redistributed. Cases accessed via NEJM website for educational/research purposes. |
+| **JAAD Case Reports (JDCR)** | CC BY-NC-ND 4.0 (open access via Elsevier) | Evaluation + knowledge base. 25 cases preprocessed from open-access PDFs. Full preprocessing pipeline included and reproducible. |
+
+NEJM data is used under educational fair use: the evaluation reads 25 cases that are publicly accessible on the NEJM Image Challenge website, compares model outputs against published diagnoses, and does not store, distribute, or train on the data. No NEJM images or texts are included in this repository.
+
 **Context Variants** (per case): Original (complete), History only, Image only, Exam only, Exam restricted (vague)
 
 **Key Results** (1,500 evaluations complete -- original variant, complete cases):

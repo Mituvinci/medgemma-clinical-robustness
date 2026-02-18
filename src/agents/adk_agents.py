@@ -524,6 +524,34 @@ def create_triage_agent(model_name: str = "gemini-pro-latest") -> Agent:
 
     ARCHITECTURE: Gemini (ADK) orchestrates, MedGemma provides clinical reasoning.
 
+    Role in pipeline: STEP 1 of 3. Receives the raw case from RootCoordinator,
+    checks data completeness, and always passes to ResearchAgent — never directly
+    to DiagnosticAgent.
+
+    Prompt Design Rationale:
+    ─────────────────────────
+    1. "ORCHESTRATION, not clinical reasoning" — forces Gemini to delegate the actual
+       medical analysis to MedGemma (via medgemma_triage_analysis tool) rather than
+       reasoning medically itself. Competition requirement: MedGemma must do all
+       clinical work.
+
+    2. Mandatory 3-step sequence — the instruction explicitly names each step with
+       CALL directives. Without this, Gemini sometimes skips tool calls and writes
+       the action as plain text (e.g., "I will call the triage tool...") without
+       actually executing it. The phrase "EXECUTE the tool call" was required after
+       observing this failure mode.
+
+    3. Always call medgemma_triage_analysis (Step 2) even if Step 1 finds no missing
+       data — this ensures MedGemma's analysis is always in the context chain passed
+       to downstream agents, which improves ResearchAgent's search query quality.
+
+    4. Transfer to ResearchAgent ONLY (never DiagnosticAgent) — ensures guideline
+       retrieval always runs before diagnosis. Safety-first: RAG evidence required.
+
+    5. Dermatology-specific missing data criteria: history + (exam OR image) +
+       demographics. Visual data (exam findings or images) is non-negotiable in
+       dermatology — a diagnosis from history alone is unsafe.
+
     Args:
         model_name: Gemini model for orchestration (default: flash for speed/cost)
 
@@ -582,6 +610,33 @@ def create_research_agent(model_name: str = "gemini-pro-latest") -> Agent:
     Create Research Agent using Google ADK.
 
     ARCHITECTURE: Gemini (ADK) orchestrates RAG retrieval, MedGemma synthesizes guidelines.
+
+    Role in pipeline: STEP 2 of 3. Receives triage context from TriageAgent,
+    queries the RAG knowledge base (Vertex AI RAG or ChromaDB), then passes
+    synthesized evidence to DiagnosticAgent.
+
+    Prompt Design Rationale:
+    ─────────────────────────
+    1. RAG retrieval is MANDATORY — even for cases where triage says "proceed".
+       This ensures all diagnoses are evidence-grounded. Competition scoring rewards
+       explainability, and cited guidelines directly support that (Explainability: 25%).
+
+    2. "If 0 results are returned, proceed immediately" — prevents the agent from
+       entering a retry loop searching with different queries. MedGemma's extensive
+       parametric medical knowledge handles cases not covered by the RAG corpus.
+       The instruction "Do NOT retry with different queries" was added after observing
+       this failure mode in early testing.
+
+    3. medgemma_guideline_synthesis is called EVEN IF 0 guidelines were retrieved —
+       MedGemma then synthesizes from its pre-trained medical knowledge alone, which
+       still provides valuable context for the DiagnosticAgent.
+
+    4. Transfer enforced as explicit tool CALL (not text) — same lesson as TriageAgent:
+       Gemini may write "I will transfer to DiagnosticAgent" without calling the tool.
+
+    5. Search strategy guidance (symptoms, morphology, demographics) — without this,
+       Gemini generates generic queries that return poor RAG results. The instruction
+       focuses queries on clinical features specific to dermatology differential diagnosis.
 
     Args:
         model_name: Gemini model for orchestration (default: flash for speed/cost)
@@ -643,6 +698,37 @@ def create_diagnostic_agent(model_name: str = "gemini-pro-latest") -> Agent:
 
     ARCHITECTURE: Gemini (ADK) coordinates, MedGemma generates the clinical diagnosis.
 
+    Role in pipeline: STEP 3 of 3. Receives full context (triage + research) from
+    RootCoordinator and produces the final SOAP note by invoking MedGemma once.
+
+    Prompt Design Rationale:
+    ─────────────────────────
+    1. "EXACTLY ONCE" constraint on medgemma_clinical_diagnosis — this is the most
+       critical safety instruction in the entire system. Without it, Gemini sometimes
+       re-calls the tool 40+ times in a loop (observed during testing). The loop
+       occurred because Gemini's default behavior is to keep calling tools until it
+       achieves a "complete" result. Since MedGemma's SOAP output is long, Gemini
+       sometimes misinterprets it as incomplete and requests more. The "EXACTLY ONCE"
+       + "output it as your FINAL response and stop" instructions break the loop.
+
+    2. "You are NOT the diagnostician" — explicitly prevents Gemini from writing
+       its own medical diagnosis. Competition requirement: MedGemma must perform
+       all clinical reasoning. Gemini is the orchestrator only.
+
+    3. "Simply pass through the MedGemma specialist's output without modification" —
+       prevents Gemini from editing/summarizing MedGemma's output, which would obscure
+       citations, confidence scores, and the SOAP structure expected by the evaluator.
+
+    4. temperature=0.0 on MedGemma (set in medgemma_clinical_diagnosis tool) —
+       deterministic output prevents the tool from producing different responses on
+       identical inputs, which was the secondary cause of the looping behavior (at
+       higher temperatures, each call produced slightly different output, which Gemini
+       interpreted as "still improving" and called again).
+
+    5. MAX_STEPS=60 in run_async() serves as the outer safety net — even if the
+       "EXACTLY ONCE" instruction is somehow ignored, the step counter terminates
+       the run before runaway API costs occur.
+
     Args:
         model_name: Gemini model for orchestration (default: flash for speed/cost)
 
@@ -702,6 +788,35 @@ def create_root_coordinator(
     This implements the "Manager-Specialist" pattern:
     - Gemini = Manager (coordinates workflow)
     - MedGemma = Specialist (performs clinical reasoning)
+
+    Role in pipeline: Entry point. Receives the case from the user/evaluator,
+    enforces the mandatory 3-agent sequence, and returns the final SOAP note.
+
+    Prompt Design Rationale:
+    ─────────────────────────
+    1. Mandatory TriageAgent → ResearchAgent → DiagnosticAgent sequence — the
+       coordinator enforces this order to prevent shortcuts. Without it, Gemini
+       sometimes tries to jump from Triage directly to Diagnostic (skipping RAG),
+       which would produce unsupported, non-evidence-grounded diagnoses.
+
+    2. RECOVERY RULE (< 1000 chars, no SOAP) — critical for evaluation robustness.
+       In early testing, the RootCoordinator sometimes returned the TriageAgent's
+       summary (which is short and has no SOAP sections) as the "final answer".
+       This rule explicitly teaches the coordinator to recognize incomplete pipeline
+       output and continue. The 1000-char threshold was empirically tuned: full SOAP
+       notes are typically 1500-3000 chars; triage-only summaries are 200-500 chars.
+
+    3. "NEVER SKIP ResearchAgent" — repeated for emphasis because skipping RAG was
+       the most common failure mode. Evidence grounding is core to the competition's
+       Explainability scoring (25%).
+
+    4. "Pass context between agents" — ensures triage results (missing items, MedGemma
+       analysis) flow into the research query, and research results (guidelines) flow
+       into the diagnosis prompt. This is what makes the pipeline coherent rather than
+       three independent calls.
+
+    5. No tools at coordinator level — the RootCoordinator only delegates to sub-agents
+       via ADK's transfer_to_agent mechanism; it never calls clinical tools directly.
 
     Args:
         model_name: Gemini model for orchestration (default: flash for speed/cost)

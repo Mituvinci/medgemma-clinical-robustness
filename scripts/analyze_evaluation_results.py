@@ -1,12 +1,48 @@
 """
-Evaluation Results Analysis Script
+Evaluation Results Analysis Script — Accuracy Metrics, Tables, and Per-Model Plots.
 
-Generates comprehensive metrics, tables, and plots from evaluation results.
+This script is the primary analysis tool for MedGemma evaluation results.
+It reads JSON output from evaluate_nejim_cases.py or evaluate_jdcr_cases.py,
+compares agent responses against ground-truth diagnoses, and produces metrics
+and visualizations used in the competition writeup.
+
+Outputs per evaluation run:
+    - Accuracy metrics CSV  (by variant: original, history_only, image_only, etc.)
+    - HTML report with embedded plots
+    - PNG plots: accuracy bar charts, pause rate charts, confusion heatmaps
+    - Per-variant breakdowns (Top-1, Top-3, Top-4, Any-Rank accuracy)
+
+Accuracy Metrics Explained:
+    Top-1 Accuracy  : Primary diagnosis (first listed in SOAP note) matches ground truth.
+    Top-3 Accuracy  : Ground truth found in ANY of the top 3 listed diagnoses.
+    Top-4 Accuracy  : Ground truth found in ANY of the top 4 listed diagnoses.
+    Any-Rank        : Ground truth found anywhere in the full differential diagnosis list.
+    Pause Rate      : Fraction of cases where agent paused (refused to diagnose).
+    Acc(att)        : Top-1 accuracy ONLY among cases that were NOT paused.
+
+Matching Strategy (fuzzy_match):
+    Exact diagnosis names vary between ground truth (e.g., "Argyria") and MedGemma
+    output (e.g., "Argyria -- silver deposition disorder"). A 4-level matching cascade
+    is used: exact -> substring -> keyword (any meaningful word matches) -> fuzzy string
+    similarity (SequenceMatcher >= 0.7). This was validated manually on 50 cases.
+
+Diagnosis Extraction (extract_diagnosis / extract_all_diagnoses):
+    MedGemma outputs SOAP notes in markdown format with varying structure. Six regex
+    patterns cover observed output styles: bold Primary Diagnosis, unbold Primary
+    Diagnosis, alternate labels (Most Likely / Final / Presumptive), Assessment section
+    with bold text, Assessment section with capitalized phrase, and Conclusion section.
+    Patterns are tried in priority order; first match wins.
+
+Context Variants:
+    Each case is evaluated in 5 variants. Only the "original" variant is used for
+    accuracy metrics (complete data expected = diagnosis provided). The incomplete
+    variants (history_only, image_only, exam_only, exam_restricted) are measured
+    for pause rate only -- accuracy is not meaningful when data is intentionally missing.
 
 Usage:
-    python scripts/analyze_evaluation_results.py \
-        --results logs/evaluation_medgemma-27b-it-vertex_without_options/nejim_evaluation_*.json \
-        --groundtruth NEJIM/NEJM_Groundtruth.csv \
+    python scripts/analyze_evaluation_results.py \\
+        --results logs/evaluation_medgemma-27b-it-vertex_without_options/nejim_evaluation_*.json \\
+        --groundtruth NEJIM/NEJM_Groundtruth.csv \\
         --output logs/analysis_report_27b_it.html
 """
 
@@ -98,13 +134,42 @@ class EvaluationAnalyzer:
 
     def extract_diagnosis(self, response_text: str) -> Tuple[str, float]:
         """
-        Extract primary diagnosis from SOAP note response.
+        Extract the primary diagnosis from a MedGemma SOAP note response.
+
+        MedGemma produces SOAP notes in markdown with varying formatting across runs
+        and model sizes. This method tries six regex patterns in priority order and
+        returns the first successful match. The patterns cover all observed output
+        styles from 1,500 evaluation runs across three MedGemma models.
+
+        Pattern priority (highest to lowest confidence):
+          1. **Primary Diagnosis:** with optional bold markers on same/next line
+             Example: "**Primary Diagnosis:** **Psoriasis** - Confidence: 0.90"
+          2. Primary Diagnosis: without bold markers
+             Example: "Primary Diagnosis: Psoriasis - Confidence: 0.90"
+          2b. Most Likely / Final / Presumptive Diagnosis: (bold)
+             Example: "**Most Likely Diagnosis:** **Lichen Planus**"
+          2c. Same labels without bold
+          3. Assessment section (A): first bold-formatted phrase on nearby lines
+             Example: "Assessment (A):\n1. **Psoriasis**"
+          4. Assessment section: first capitalized phrase (fallback, lowest precision)
+          5. Conclusion section with bold diagnosis
+             Example: "**Conclusion**: The most likely diagnosis is **Argyria**"
+
+        If no pattern matches, returns ("Unknown", 0.0). Callers treat "Unknown"
+        as a missed extraction and exclude the case from accuracy calculations.
+
+        The _clean() helper strips markdown formatting, bullet prefixes, MCQ option
+        letters (A), B), etc.), and trailing confidence text from the extracted string.
 
         Args:
-            response_text: Full agent response with SOAP note
+            response_text: Full text of the agent's response (may be hundreds of lines).
 
         Returns:
-            (diagnosis, confidence) tuple
+            Tuple of (diagnosis_string, confidence_score):
+                diagnosis_string: Cleaned diagnosis name (e.g., "Psoriasis Vulgaris")
+                confidence_score: Float 0.0-1.0 extracted from confidence annotation,
+                                  or 0.5 if no confidence annotation found,
+                                  or 0.3 for lower-confidence patterns (3-5).
         """
         # Helper to extract confidence from nearby text
         def _extract_confidence(text: str) -> float:

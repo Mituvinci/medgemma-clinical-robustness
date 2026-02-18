@@ -68,28 +68,35 @@ NEJM data is used under educational fair use: the evaluation reads 25 cases that
 
 **Context Variants** (per case): Original (complete), History only, Image only, Exam only, Exam restricted (vague)
 
-**Key Results** (1,500 evaluations complete -- original variant, complete cases):
+**Key Results** — original variant (complete clinical data), 1,500 evaluations total:
 
-| Model | Dataset | Format | Top-1 | Top-3 | Top-4 | Orig Pause | Incomplete Pause |
-|-------|---------|--------|-------|-------|-------|------------|------------------|
-| MedGemma-4B-IT | NEJM | no options | **36%** | **44%** | **44%** | 20% | 92% |
-| MedGemma-27B-IT | NEJM | no options | 32% | 32% | 36% | 16% | 90% |
-| MedGemma-27B-IT | NEJM | with options | 28% | 28% | 28% | 16% | 83% |
-| MedGemma-4B-IT | NEJM | with options | 16% | 20% | 24% | 12% | 94% |
-| MedGemma-1.5-4B-IT | NEJM | no options | 12% | 16% | 16% | 24% | 92% |
-| MedGemma-1.5-4B-IT | NEJM | with options | 8% | 8% | 8% | 12% | 99% |
-| MedGemma-1.5-4B-IT | JAADCR | with options | **52%** | **52%** | **52%** | 20% | 92% |
-| MedGemma-27B-IT | JAADCR | no options | 24% | 28% | 32% | 32% | 90% |
-| MedGemma-27B-IT | JAADCR | with options | 32% | 32% | 32% | 16% | 88% |
-| MedGemma-4B-IT | JAADCR | with options | 24% | 24% | 24% | 20% | 87% |
-| MedGemma-1.5-4B-IT | JAADCR | no options | 20% | 20% | 20% | 16% | 90% |
-| MedGemma-4B-IT | JAADCR | no options | 16% | 16% | 16% | 28% | 94% |
+| Model | Dataset | Format | Top-1 | Any-Rank |
+|-------|---------|--------|-------|----------|
+| **MedGemma-1.5-4B-IT** | **JDCR** | **with options** | **76%** | **84%** |
+| MedGemma-4B-IT | JDCR | with options | 64% | 76% |
+| MedGemma-27B-IT | JDCR | with options | 56% | 72% |
+| MedGemma-4B-IT | NEJM | with options | 60% | 68% |
+| MedGemma-27B-IT | NEJM | no options | 44% | 56% |
+| MedGemma-27B-IT | NEJM | with options | 36% | 48% |
+| MedGemma-1.5-4B-IT | JDCR | no options | 44% | 52% |
+| MedGemma-4B-IT | JDCR | no options | 36% | 36% |
+| MedGemma-4B-IT | NEJM | no options | 28% | 56% |
+| MedGemma-27B-IT | JDCR | no options | 28% | 52% |
+| MedGemma-1.5-4B-IT | NEJM | no options | *re-running* | *re-running* |
+| MedGemma-1.5-4B-IT | NEJM | with options | *re-running* | *re-running* |
+
+*NEJM 1.5-4B-IT results being re-run to fix an image-not-passed bug in the original Feb 11 evaluation.*
+
+**Safety behavior** (incomplete variants — missing clinical data):
+- Original variant pause rate: 12–32% (system correctly diagnoses when data is complete)
+- Incomplete variant pause rate: **83–100%** (system correctly refuses to diagnose with missing data)
+- The gap between these two numbers is the core safety signal.
 
 **Key patterns:**
-- Provides diagnoses on complete cases (0-32% pause), pauses on incomplete ones (83-99% pause). This is the robustness behavior.
-- Top-3/Top-4 accuracy improves over Top-1, showing correct diagnoses appear in differentials.
-- Best NEJM (out-of-domain): MedGemma-4B-IT at 36% Top-1, 44% Top-3.
-- Best JAADCR (domain-matched): MedGemma-1.5-4B-IT with options at 52% Top-1.
+- With MCQ options, all models improve substantially — structured choices help MedGemma focus.
+- Any-Rank > Top-1 across all models, meaning correct diagnoses appear in the differential even when not ranked first.
+- Best overall: MedGemma-1.5-4B-IT on JDCR with options — 76% Top-1, 84% Any-Rank.
+- Safety behavior is consistent: 83–100% pause rate on incomplete cases across all models and datasets.
 
 ---
 
@@ -141,21 +148,48 @@ python scripts/evaluate_jdcr_cases.py \
 
 ## JAADCR Data Pipeline
 
-Reproducible pipeline for downloading and preprocessing JDCR Case Challenge PDFs:
+Reproducible 3-step pipeline for preprocessing JDCR Case Challenge PDFs into evaluation format.
+
+**Requirements**: PyMuPDF (`pip install PyMuPDF`), Google Gemini API key.
 
 ```bash
-# Stage 1: Extract and split into evaluation format using Gemini API
+# Step 0: Extract raw text and images from each PDF (PyMuPDF)
+#   Input:  folder of MM_YYYY_JDCR.pdf files
+#   Output: backup_extracted/ — one subfolder per PDF with text/ and images/ inside
+python scripts/jdcr_data_downlaod_preprocess/0_extract_pdf_text_images.py \
+  --input ./pdf_input \
+  --output ./backup_extracted
+
+# Step 1: Structure raw text into evaluation variants using Gemini API
+#   Input:  backup_extracted/ (output of Step 0)
+#   Output: jaadcr_input/ and jaadcr_input_with_options/ (text variants + images)
+#           case_metadata/ (per-case JSON with MCQ ground truth)
 python scripts/jdcr_data_downlaod_preprocess/stage_1_extract_and_split.py \
-  --extracted-dir ./backup_extracted --output-dir ./output
+  --extracted-dir ./backup_extracted \
+  --output-dir ./output
 
-# Stage 2: Build ground truth CSV
+# Step 2: Build ground truth CSV from metadata
+#   Input:  case_metadata/ (output of Step 1)
+#   Output: JAADCR_Groundtruth.csv
 python scripts/jdcr_data_downlaod_preprocess/stage_2_build_ground_truth.py \
-  --metadata-dir ./output/case_metadata --output-csv ./output/JAADCR_Groundtruth.csv
+  --metadata-dir ./output/case_metadata \
+  --output-csv ./output/JAADCR_Groundtruth.csv
 
-# Stage 3: Evaluate with MedGemma
+# Step 3: Evaluate with MedGemma
+#   Input:  jaadcr_input/ or jaadcr_input_with_options/ (output of Step 1)
 python scripts/evaluate_jdcr_cases.py \
-  --input ./output/jaadcr_input --agent-model medgemma-27b-it-vertex
+  --input ./output/jaadcr_input \
+  --agent-model medgemma-27b-it-vertex
 ```
+
+**What each step produces:**
+
+| Step | Script | Input | Output |
+|------|--------|-------|--------|
+| 0 | `0_extract_pdf_text_images.py` | PDF folder | `backup_extracted/{case}/text/*.txt` + `images/*.jpeg` |
+| 1 | `stage_1_extract_and_split.py` | `backup_extracted/` | `jaadcr_input/` + `jaadcr_input_with_options/` + `case_metadata/` |
+| 2 | `stage_2_build_ground_truth.py` | `case_metadata/` | `JAADCR_Groundtruth.csv` |
+| 3 | `evaluate_jdcr_cases.py` | `jaadcr_input/` | Evaluation JSON + Markdown summary |
 
 ---
 

@@ -9,6 +9,7 @@ Supports any MedGemma variant deployed as a Vertex AI endpoint
 import base64
 import json
 import logging
+import time
 from typing import Dict, Any, Optional
 
 from google.cloud import aiplatform
@@ -81,41 +82,58 @@ class VertexMedGemmaAdapter(BaseLLM):
         Returns:
             Generated text
         """
-        try:
-            # MedGemma-IT models require the Gemma instruction-tuned chat template.
-            # Sending raw text without it causes the model to treat the prompt as a
-            # base-model completion task, producing garbage output.
-            chat_prompt = (
-                f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
-            )
-            instance = {"prompt": chat_prompt}
-
-            # Handle image input if provided
+        # Retry loop — Vertex AI online prediction endpoints have per-minute quotas.
+        # 8 micro-calls per analysis can exhaust the quota during rapid testing.
+        # Retry up to 3 times with 15-second backoff on 429 / RESOURCE_EXHAUSTED.
+        _MAX_RETRIES = 3
+        for _attempt in range(_MAX_RETRIES):
+          try:
+            # chatCompletions format — required by new MedGemma Vertex AI deployments.
+            # Old {"prompt": ..., "image": ...} format is rejected with 500.
             image_path = kwargs.get("image_path")
+            content = [{"type": "text", "text": prompt}]
             if image_path:
-                instance["image"] = self._encode_image(image_path)
+                import os as _os
+                ext = _os.path.splitext(image_path)[1].lower().lstrip(".")
+                mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+                b64 = self._encode_image(image_path)
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"}
+                })
 
-            # Pass generation parameters — without these the endpoint uses defaults
-            # (very short output, wrong temperature) causing truncated/garbage responses.
-            parameters = {
-                "max_new_tokens": max_tokens,
-                "temperature": max(temperature, 1e-6),  # Vertex rejects exactly 0.0
-                "do_sample": temperature > 0.01,
+            instance = {
+                "@requestFormat": "chatCompletions",
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": max_tokens,
+                "temperature": max(temperature, 1e-6),
             }
 
-            response = self.endpoint.predict(instances=[instance], parameters=parameters)
+            response = self.endpoint.predict(instances=[instance], parameters={})
 
-            # Extract text from predictions
-            if response.predictions:
-                result = response.predictions[0]
-                if isinstance(result, str):
-                    text = result
-                elif isinstance(result, dict):
-                    text = result.get("generated_text", result.get("text", str(result)))
-                else:
-                    text = str(result)
+            # Extract text from chatCompletions response.
+            # response.predictions may be a list OR a dict depending on the deployment.
+            print(f"\n===RAW PREDICTIONS TYPE: {type(response.predictions)}===\n{repr(response.predictions)[:500]}\n", flush=True)
+            preds = response.predictions
+            if isinstance(preds, list) and len(preds) > 0:
+                result = preds[0]
+            elif isinstance(preds, dict):
+                result = preds
             else:
+                result = None
+
+            if result is None:
                 text = ""
+            elif isinstance(result, str):
+                text = result
+            elif isinstance(result, dict):
+                choices = result.get("choices", [])
+                if choices:
+                    text = choices[0].get("message", {}).get("content", "")
+                else:
+                    text = result.get("generated_text", result.get("text", str(result)))
+            else:
+                text = str(result)
 
             print(f"\n===RAW VERTEX RESPONSE ({len(text)} chars)===\n{repr(text)}\n===END RAW===\n", flush=True)
 
@@ -163,7 +181,17 @@ class VertexMedGemmaAdapter(BaseLLM):
             logger.debug(f"Vertex AI MedGemma generated {len(text)} characters")
             return text
 
-        except Exception as e:
+          except Exception as e:
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+            if is_rate_limit and _attempt < _MAX_RETRIES - 1:
+                wait_sec = 15 * (_attempt + 1)  # 15s, 30s
+                logger.warning(
+                    f"Vertex AI 429 rate limit on attempt {_attempt + 1}/{_MAX_RETRIES}. "
+                    f"Waiting {wait_sec}s before retry..."
+                )
+                time.sleep(wait_sec)
+                continue
             logger.error(f"Error calling Vertex AI endpoint: {e}")
             raise
 

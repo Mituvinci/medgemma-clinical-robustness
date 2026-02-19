@@ -88,6 +88,9 @@ _run_outputs: Dict[str, Any] = {
     "last_triage_output": None,
     "last_research_context": None,
     "last_diagnostic_output": None,
+    "last_image_path": None,         # image path threaded to MedGemma micro-calls
+    "last_retrieved_guidelines": [],  # guidelines from RAG, passed to UI for citations
+    "last_rag_query": "",             # search query used, for citations display
 }
 
 
@@ -134,11 +137,13 @@ _agent_model_choice = "medgemma"  # Global: "medgemma" or "gemini"
 def _specialist_display_name() -> str:
     """Return the actual model display name based on current _agent_model_choice."""
     names = {
-        "medgemma-vertex":       "google/medgemma-1.5-4b-it (Vertex AI)",
-        "medgemma-1.5-4b":       "google/medgemma-1.5-4b-it",
-        "medgemma-hf":           "google/medgemma-1.5-4b-it (HF)",
-        "medgemma":              "google/medgemma-27b-it",
-        "gemini":                "gemini (baseline)",
+        "medgemma-vertex":        "google/medgemma-1.5-4b-it (Vertex AI)",
+        "medgemma-1.5-4b":        "google/medgemma-1.5-4b-it",
+        "medgemma-hf":            "google/medgemma-1.5-4b-it (HF API)",
+        "medgemma":               "google/medgemma-27b-it",
+        "medgemma-27b-it-vertex": "google/medgemma-27b-it (Vertex AI)",
+        "medgemma-4b-it-vertex":  "google/medgemma-4b-it (Vertex AI)",
+        "gemini":                 "gemini (baseline)",
     }
     return names.get(_agent_model_choice, _agent_model_choice)
 
@@ -267,6 +272,10 @@ def retrieve_clinical_guidelines(
 
     logger.info(f"Retrieved {len(guidelines)} guidelines (top similarity: {result['top_similarity']:.2f})")
 
+    # Store for UI citation display (bypasses function-call arg parsing which is fragile)
+    _run_outputs["last_retrieved_guidelines"] = guidelines
+    _run_outputs["last_rag_query"] = query
+
     return result
 
 
@@ -337,10 +346,20 @@ def medgemma_triage_analysis(
     """
     logger.info("Calling MedGemma Specialist for triage analysis")
 
+    # Check if an image was attached — this is clinical information for dermatology
+    image_path = _run_outputs.get("last_image_path")
+    image_note = (
+        "\n\nIMPORTANT: A clinical dermatology image has been attached to this case. "
+        "The image IS clinical information. Visual examination of the lesion IS sufficient "
+        "for dermatological triage — you can see the morphology, distribution, and color directly. "
+        "Treat the image as part of the case data when deciding sufficiency."
+        if image_path else ""
+    )
+
     prompt = f"""You are an expert dermatology triage specialist.
 
 FULL CASE TEXT:
-{case_summary}
+{case_summary}{image_note}
 
 YOUR TASK:
 Read the case text above carefully. YOU decide whether there is sufficient clinical information to make a diagnosis.
@@ -348,17 +367,21 @@ Read the case text above carefully. YOU decide whether there is sufficient clini
 Judge by CONTENT, not format. A clinical narrative that describes the patient's demographics, symptoms, and lesion characteristics IS sufficient — even if it was entered as free text rather than structured fields.
 
 Decision rules:
-- If the case contains enough clinical detail to attempt a differential diagnosis → respond with: "SUFFICIENT: Proceed with diagnosis." followed by a brief summary of key clinical findings.
-- If genuinely critical information is missing (e.g., no description of the lesion at all, completely unknown patient) → ask specific, clinically meaningful questions. Be precise: ask for what you actually need, not generic fields.
+- A complete case needs BOTH: (1) some clinical context (patient age, chief complaint, or symptom duration) AND (2) either a lesion description or a clinical image.
+- If both are present → respond with: "DETAILS: Proceed with diagnosis." followed by a brief summary of key clinical findings.
+- If an image is attached but the text input is only a command like "provide SOAP" or "analyze this" with NO clinical context → this is LACK INFORMATION. Ask for: patient age, chief complaint, and duration of symptoms.
+- If there is clinical context but NO image and NO lesion description → ask for a description of the lesion or a clinical photo.
+- If genuinely nothing useful was provided → ask for age, chief complaint, duration, and a lesion description or photo.
 
-Do NOT ask for information that is already present in the case text."""
+Do NOT ask for information that is already present in the case text or clearly visible in the image."""
 
     try:
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
             max_tokens=500,  # Keep triage concise — long output bloats diagnostic prompt input
-            temperature=0.0
+            temperature=0.0,
+            **({"image_path": image_path} if image_path else {})
         )
         response = _sanitize_response(response)
 
@@ -479,10 +502,10 @@ def medgemma_clinical_diagnosis(
     NOTES FIRST". This caused MedGemma to narrate/echo the triage notes rather than
     generating a SOAP note (it treated the instruction as a reading comprehension task).
 
-    The fix: detect whether triage said SUFFICIENT or INSUFFICIENT, then branch:
-    - SUFFICIENT → clean, direct "Generate a complete SOAP note" prompt with case data
+    The fix: detect whether triage said DETAILS or LACK INFORMATION, then branch:
+    - DETAILS → clean, direct "Generate a complete SOAP note" prompt with case data
       and guidelines. No triage notes in the prompt at all — avoids the echo problem.
-    - INSUFFICIENT → short prompt asking MedGemma to output the clarifying questions
+    - LACK INFORMATION → short prompt asking MedGemma to output the clarifying questions
       identified during triage, with case data for reference.
 
     Recovery Path Compatibility:
@@ -515,16 +538,19 @@ def medgemma_clinical_diagnosis(
     # because Gemini summarizes/truncates context when passing args to this tool.
     real_triage_notes = _run_outputs.get("last_triage_output") or 'No triage notes.'
     real_research_context = _run_outputs.get("last_research_context") or 'No guidelines retrieved.'
-    logger.info(f"Using stored triage ({len(real_triage_notes)} chars) and research ({len(real_research_context)} chars)")
+    image_path = _run_outputs.get("last_image_path")  # pass to every MedGemma generate() call
+    logger.info(f"Using stored triage ({len(real_triage_notes)} chars) and research ({len(real_research_context)} chars), image={'yes' if image_path else 'no'}")
 
     # Route to the appropriate prompt based on triage verdict.
-    # "sufficient" in the triage output means MedGemma-triage found enough data to diagnose.
-    # This check also handles the case where no triage notes exist (default to sufficient
-    # so we always attempt diagnosis when called directly via the recovery path).
+    # "details" is NOT a substring of "lack information" so no collision risk.
+    _triage_lower = real_triage_notes.strip().lower()
     triage_says_sufficient = (
         not real_triage_notes
-        or "sufficient" in real_triage_notes.lower()
-        or real_triage_notes.strip().lower().startswith("sufficient")
+        or _triage_lower == "no triage notes."
+        or (
+            "details" in _triage_lower
+            and "lack information" not in _triage_lower
+        )
     )
 
     if triage_says_sufficient:
@@ -546,7 +572,8 @@ def medgemma_clinical_diagnosis(
             raw = specialist.generate(
                 prompt=f"{ctx}\nAnswer in one short sentence only, no preamble: {q}",
                 max_tokens=500,
-                temperature=0.0
+                temperature=0.0,
+                **({"image_path": image_path} if image_path else {})
             ).strip()
             lower = raw.lower()
             for p in _PREAMBLES:
@@ -631,7 +658,8 @@ Be precise — ask only for what is genuinely missing from the case description 
         response = specialist.generate(
             prompt=prompt,
             max_tokens=500,
-            temperature=0.0
+            temperature=0.0,
+            **({"image_path": image_path} if image_path else {})
         )
         response = _sanitize_response(response)
 
@@ -721,10 +749,10 @@ Step 2: CALL medgemma_triage_analysis tool.
   - Pass case_summary = the FULL ORIGINAL CASE TEXT verbatim (do NOT summarize or shorten it).
   - Pass missing_items = [] (empty — MedGemma will decide what is missing from the text itself).
 
-Step 3: ALWAYS call transfer_to_agent(agent_name='ResearchAgent').
-  - Do this regardless of whether MedGemma found missing data or not.
-  - Writing "Transfer to ResearchAgent" as text is NOT enough — you must EXECUTE the tool call.
-  - The triage result (complete or incomplete) will be passed as context to the next agents.
+Step 3 (CONDITIONAL — read MedGemma's response from Step 2):
+  - If MedGemma's response starts with "DETAILS" → CALL transfer_to_agent(agent_name='ResearchAgent').
+  - If MedGemma's response starts with "LACK INFORMATION" OR contains clarifying questions → DO NOT transfer to any agent. Output MedGemma's clarifying questions directly as your response and STOP.
+  - Writing "Transfer to ResearchAgent" as text is NOT enough — you must EXECUTE the tool call when transferring.
 """,
         tools=[
             FunctionTool(analyze_case_completeness),
@@ -1011,22 +1039,22 @@ Your Sub-Agents:
 2. ResearchAgent - Orchestrates guideline retrieval (MedGemma synthesizes)
 3. DiagnosticAgent - Orchestrates diagnosis (MedGemma generates SOAP note)
 
-WORKFLOW SEQUENCE — ALWAYS RUN ALL 3 AGENTS IN THIS ORDER:
+WORKFLOW SEQUENCE — CONDITIONAL ON TRIAGE RESULT:
 
 Step 1: Delegate to TriageAgent.
-  - TriageAgent will assess the case and ALWAYS transfer to ResearchAgent.
+  - TriageAgent calls MedGemma to assess whether the case has enough clinical data.
 
-Step 2: TriageAgent transfers to ResearchAgent automatically.
-  - ResearchAgent retrieves guidelines and ALWAYS transfers to DiagnosticAgent.
-
-Step 3: DiagnosticAgent produces the FINAL output.
-  - If data was complete → DiagnosticAgent outputs a SOAP note.
-  - If data was incomplete → DiagnosticAgent outputs clarifying questions.
-  - Either way, return DiagnosticAgent's output as your final response.
+Step 2 (CONDITIONAL — depends on TriageAgent result):
+  - If TriageAgent returned clarifying questions (MedGemma said data is LACK INFORMATION):
+      → Return those questions to the user immediately as your final response.
+      → DO NOT proceed to ResearchAgent or DiagnosticAgent.
+  - If TriageAgent transferred to ResearchAgent (MedGemma said data is DETAILS):
+      → Let ResearchAgent and DiagnosticAgent complete their work.
+      → Return DiagnosticAgent's SOAP note as your final response.
 
 CRITICAL RULES:
-- NEVER skip any agent. All 3 ALWAYS run: Triage → Research → Diagnostic.
-- NEVER let TriageAgent be the final output. DiagnosticAgent is ALWAYS last.
+- If triage found LACK INFORMATION → TriageAgent's clarifying questions ARE the final output. Return them.
+- If triage found DETAILS → all 3 agents run: Triage → Research → Diagnostic.
 - Pass full context between agents (triage results → research → diagnostic).
 
 RECOVERY RULE:
@@ -1158,6 +1186,9 @@ class MedGemmaWorkflow:
         from google.genai import types as genai_types
 
         parts = [genai_types.Part(text=user_message)]
+
+        # Store image path so MedGemma micro-calls inside medgemma_clinical_diagnosis can use it
+        _run_outputs["last_image_path"] = case.image_path if case.image_path else None
 
         # Attach first image as inline_data for multimodal input
         if case.image_path:
@@ -1507,9 +1538,14 @@ class MedGemmaWorkflow:
         medgemma_diagnostic_raw = _run_outputs.get("last_diagnostic_output")
         medgemma_triage_raw = _run_outputs.get("last_triage_output")
         medgemma_research_raw = _run_outputs.get("last_research_context")  # saved for recovery
-        _run_outputs["last_diagnostic_output"] = None  # clear after use
-        _run_outputs["last_triage_output"] = None       # clear after use
-        _run_outputs["last_research_context"] = None    # clear after use
+        retrieved_guidelines_saved = _run_outputs.get("last_retrieved_guidelines", [])
+        rag_query_saved = _run_outputs.get("last_rag_query", "")
+        _run_outputs["last_diagnostic_output"] = None    # clear after use
+        _run_outputs["last_triage_output"] = None        # clear after use
+        _run_outputs["last_research_context"] = None     # clear after use
+        _run_outputs["last_image_path"] = None           # clear after use
+        _run_outputs["last_retrieved_guidelines"] = []   # clear after use
+        _run_outputs["last_rag_query"] = ""              # clear after use
 
         # Did DiagnosticAgent actually call medgemma_clinical_diagnosis?
         diagnostic_tool_was_called = any(
@@ -1532,8 +1568,8 @@ class MedGemmaWorkflow:
             logger.info(f"response_text source: DiagnosticAgent buffer ({len(response_text)} chars)")
         elif not diagnostic_tool_was_called:
             # DiagnosticAgent never ran — pipeline cut short (Gemini stopped after RAG).
-            # If triage said SUFFICIENT, force a direct MedGemma diagnosis call now.
-            triage_said_sufficient = medgemma_triage_raw and "sufficient" in medgemma_triage_raw.lower()
+            # If triage said DETAILS, force a direct MedGemma diagnosis call now.
+            triage_said_sufficient = medgemma_triage_raw and "details" in medgemma_triage_raw.lower() and "lack information" not in medgemma_triage_raw.lower()
             if triage_said_sufficient:
                 logger.warning("Pipeline cut short after ResearchAgent — forcing direct diagnosis call")
                 # Restore _run_outputs before the direct call so medgemma_clinical_diagnosis
@@ -1558,9 +1594,9 @@ class MedGemmaWorkflow:
                     response_text = medgemma_triage_raw or triage_text or "Pipeline stopped before diagnosis. Please try again."
                     logger.warning("Recovery diagnosis also failed")
             else:
-                # Triage said INSUFFICIENT — triage output has the questions
+                # Triage said LACK INFORMATION — triage output has the questions
                 response_text = medgemma_triage_raw or triage_text or ""
-                logger.info(f"response_text source: triage output (INSUFFICIENT, diagnostic skipped) ({len(response_text)} chars)")
+                logger.info(f"response_text source: triage output (LACK INFORMATION, diagnostic skipped) ({len(response_text)} chars)")
         elif diagnostic_tool_was_called:
             # Diagnostic ran but all sources empty — error
             response_text = "MedGemma diagnostic call completed but returned empty output. Please check the model endpoint and try again."
@@ -1580,7 +1616,9 @@ class MedGemmaWorkflow:
             "response": response_text.strip(),
             "model": self.model_name,
             "agent_steps_count": len(agent_steps),
-            "agent_steps": agent_steps  # full step list for UI display
+            "agent_steps": agent_steps,  # full step list for UI display
+            "retrieved_guidelines": retrieved_guidelines_saved,  # for citations display
+            "rag_query": rag_query_saved,  # search query used
         }
 
         # Complete and save session

@@ -116,6 +116,7 @@ class MedGemmaApp:
             file_ext = file_path.lower() if isinstance(file_path, str) else file_path.name.lower()
 
             if any(file_ext.endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
+                case_data["image_path"] = file_path  # path for workflow image attachment
                 case_data["image_data"] = Image.open(file_path)
             elif any(file_ext.endswith(ext) for ext in ['.json', '.txt', '.pdf']):
                 file_data = self.parse_case_file(file_path)
@@ -134,7 +135,7 @@ class MedGemmaApp:
         # Build case from inputs BEFORE clearing
         case_data = self.build_case_from_inputs(text_input, file_list, session_id)
 
-        # STATE: Analyzing — keep user's text visible so they know their input was received
+        # STATE: Analyzing — keep text visible (clinical tool UX: user sees what was submitted)
         yield (
             "Processing your case...",  # soap_output
             "",  # reasoning_output
@@ -150,7 +151,20 @@ class MedGemmaApp:
             self.current_case = ClinicalCase(**case_data)
 
             logger.info(f"Starting workflow for {session_id}")
-            result = asyncio.run(self.workflow.run_async(self.current_case))
+            import time as _time
+            _result = None
+            for _attempt in range(3):
+                try:
+                    _result = asyncio.run(self.workflow.run_async(self.current_case))
+                    break
+                except Exception as _e:
+                    if ("429" in str(_e) or "RESOURCE_EXHAUSTED" in str(_e)) and _attempt < 2:
+                        _wait = 20 * (_attempt + 1)
+                        logger.warning(f"Pipeline 429 rate limit, retrying in {_wait}s (attempt {_attempt+1}/3)")
+                        _time.sleep(_wait)
+                    else:
+                        raise
+            result = _result
 
             # run_async returns "response" (full agent output), not "soap_note"
             response_text = result.get("response", "No diagnosis generated.")
@@ -494,9 +508,10 @@ class MedGemmaApp:
         model_name = result.get("model", "gemini-2.0-flash")
         agent_steps = result.get("agent_steps", [])
 
+        from src.agents.adk_agents import _specialist_display_name
         trace = "### Clinical Reasoning Pipeline\n\n"
         trace += f"**Orchestrator**: {model_name} (Google ADK)  \n"
-        trace += f"**Clinical AI**: MedGemma (google/medgemma-1.5-4b-it via Vertex AI)\n\n"
+        trace += f"**Clinical AI**: MedGemma ({_specialist_display_name()})\n\n"
         trace += "---\n\n"
 
         TOOL_LABELS = {
@@ -569,26 +584,39 @@ class MedGemmaApp:
             citations_md += "- JAAD Case Reports\n"
             return citations_md
 
-        # Extract guideline titles from the RAG step's tool call args (most reliable source)
+        # Primary source: guidelines stored directly by retrieve_clinical_guidelines tool
+        # (bypasses fragile function-call arg string parsing)
         rag_docs = []
-        for step in agent_steps:
-            for fc in step.get("function_calls", []):
-                if fc.get("name") == "retrieve_clinical_guidelines":
-                    # The args string contains the query used
-                    args = fc.get("args", "")
-                    m = re.search(r"'query':\s*'([^']+)'", args)
-                    if m:
-                        rag_docs.append(("Query used", m.group(1)))
-                elif fc.get("name") == "medgemma_guideline_synthesis":
-                    # Extract doc titles from args
-                    args = fc.get("args", "")
-                    titles = re.findall(r"'title':\s*'([^']+)'", args)
-                    sources = re.findall(r"'source':\s*'([^']+)'", args)
-                    scores = re.findall(r"'similarity_score':\s*([\d.]+)", args)
-                    for i, title in enumerate(titles):
-                        src = sources[i] if i < len(sources) else "AAD"
-                        score = float(scores[i]) if i < len(scores) else 0.0
-                        rag_docs.append((src, title, score))
+        stored_guidelines = result.get("retrieved_guidelines", [])
+        rag_query = result.get("rag_query", "")
+
+        if rag_query:
+            rag_docs.append(("Query used", rag_query))
+
+        for g in stored_guidelines:
+            src = g.get("source", "Unknown")
+            title = g.get("title", "Untitled")
+            score = g.get("similarity_score", 0.0)
+            rag_docs.append((src, title, score))
+
+        # Fallback: if stored_guidelines is empty, parse from function call args
+        if not stored_guidelines:
+            for step in agent_steps:
+                for fc in step.get("function_calls", []):
+                    if fc.get("name") == "retrieve_clinical_guidelines" and not rag_query:
+                        args = fc.get("args", "")
+                        m = re.search(r"'query':\s*'([^']+)'", args)
+                        if m:
+                            rag_docs.insert(0, ("Query used", m.group(1)))
+                    elif fc.get("name") == "medgemma_guideline_synthesis":
+                        args = fc.get("args", "")
+                        titles = re.findall(r"'title':\s*'([^']+)'", args)
+                        sources = re.findall(r"'source':\s*'([^']+)'", args)
+                        scores = re.findall(r"'similarity_score':\s*([\d.]+)", args)
+                        for i, title in enumerate(titles):
+                            src_item = sources[i] if i < len(sources) else "AAD"
+                            score_item = float(scores[i]) if i < len(scores) else 0.0
+                            rag_docs.append((src_item, title, score_item))
 
         # Also search response text for inline citations
         inline_sources = re.findall(r'Source:\s*([^\n\r]+)', response, re.IGNORECASE)
@@ -599,6 +627,7 @@ class MedGemmaApp:
         if rag_docs:
             citations_md += "*Documents retrieved from RAG corpus (Vertex AI RAG):*\n\n"
             seen_titles = set()
+            has_docs = False
             for item in rag_docs:
                 if item[0] == "Query used":
                     citations_md += f"**Search query**: `{item[1]}`\n\n"
@@ -607,9 +636,18 @@ class MedGemmaApp:
                     src, title, score = item
                     # Strip PDF extension for readability
                     clean_title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE).replace('_', ' ').replace('-', ' ')
-                    if clean_title not in seen_titles:
+                    if clean_title not in seen_titles and clean_title.strip() and clean_title.lower() not in ("untitled", "unknown"):
                         seen_titles.add(clean_title)
                         citations_md += f"- **{src}** — {clean_title} *(similarity: {score:.2f})*\n"
+                        has_docs = True
+                    elif clean_title not in seen_titles:
+                        # Show even Unknown/Untitled with source info if it has a score
+                        seen_titles.add(clean_title)
+                        citations_md += f"- **{src}** — *(similarity: {score:.2f})*\n"
+                        has_docs = True
+            if not has_docs:
+                citations_md += "*No matching guideline documents retrieved for this query.*\n"
+                citations_md += "*MedGemma still generated the SOAP note — diagnosis is based on the clinical case data.*\n"
             citations_md += "\n"
 
         if inline_all:
@@ -638,7 +676,7 @@ class MedGemmaApp:
             text_size=gr.themes.sizes.text_sm,
             spacing_size=gr.themes.sizes.spacing_sm,
             radius_size=gr.themes.sizes.radius_sm,
-            font=("system-ui", "-apple-system", "sans-serif"),
+            font=("Segoe UI",),
         )
 
         with gr.Blocks(title="MedGemma Clinical Robustness Assistant", theme=theme) as app:
@@ -878,6 +916,18 @@ hr {
                 )
 
                 gr.HTML("""<style>
+                /* Zero out the group wrapper and ALL inner Gradio .block divs */
+                #example-btns-group {
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    gap: 0 !important;
+                    border: none !important;
+                    background: transparent !important;
+                }
+                #example-btns-group > * {
+                    padding: 0 !important;
+                    margin: 0 !important;
+                }
                 /* Style example buttons as clickable text rows, flush to left */
                 #example-btn-0, #example-btn-1,
                 #example-btn-0 *, #example-btn-1 * {
@@ -902,6 +952,7 @@ hr {
     		    padding-left: 0 !important;
                     margin-left: 0 !important;
                     text-align: left !important;
+                    font-family: monospace !important;
                 }
                 #example-btn-0 button:hover, #example-btn-1 button:hover {
                     background: #f5f5f5 !important;
@@ -909,12 +960,16 @@ hr {
                     margin-left: 0 !important;
                     text-align: left !important;
                 }
-                #example-divider {
-                    border: none;
-                    border-top: 1px solid #e8e8e8;
-                    margin: 0;
+                /* Divider between example cases — CSS border instead of a separate HTML block */
+                #example-btn-0 button {
+                    border-bottom: 1px solid #e8e8e8 !important;
+		    font-family: monospace !important;
                 }
-               #example-btn-0 .gr-button,
+               #example-btn-0 .gr-button.gr-button {
+                     padding-left: 0 !important;
+                     font-family: monospace !important;
+               }
+
                #example-btn-1 .gr-button {
                      padding-left: 0 !important;
                }
@@ -923,23 +978,23 @@ hr {
                   <span style='font-size:18px; font-weight:600;'>Example Cases (Click to load):</span>
                 </div>""")
 
-                example_btn_0 = gr.Button(
-                    value=(
-                        "Case 1 : 73M, post-vaccine rash:  "
-                        + _CASE1_FULL[:200] + "..."
-                    ),
-                    variant="secondary",
-                    elem_id="example-btn-0",
-                )
-                gr.HTML('<hr id="example-divider">')
-                example_btn_1 = gr.Button(
-                    value=(
-                        "Case 2 : 10M, tense bullae:  "
-                        + _CASE2_FULL[:200] + "..."
-                    ),
-                    variant="secondary",
-                    elem_id="example-btn-1",
-                )
+                with gr.Group(elem_id="example-btns-group"):
+                    example_btn_0 = gr.Button(
+                        value=(
+                            "Case 1 : 73M, post-vaccine rash:  "
+                            + _CASE1_FULL[:215] + "..."
+                        ),
+                        variant="secondary",
+                        elem_id="example-btn-0",
+                    )
+                    example_btn_1 = gr.Button(
+                        value=(
+                            "Case 2 : 10M, tense bullae:  "
+                            + _CASE2_FULL[:217] + "..."
+                        ),
+                        variant="secondary",
+                        elem_id="example-btn-1",
+                    )
                 #gr.Markdown("---")
 
              

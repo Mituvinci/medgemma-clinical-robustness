@@ -180,7 +180,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "model_id": "google/medgemma-27b-it",
         "project_id": settings.google_cloud_project,
         "region": "us-central1",
-        "endpoint_id": "mg-endpoint-29b8c391-3edf-400c-8f83-b7ef88fed989",
+        "endpoint_id": "mg-endpoint-aec70de8-b891-489e-b42b-f8d8794472c2",
         "strengths": [
             "Medical knowledge (27B params)",
             "Advanced clinical reasoning",

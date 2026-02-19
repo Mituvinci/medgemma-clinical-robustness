@@ -142,30 +142,51 @@ class VertexRAGRetriever:
             elif hasattr(ctx, "segment") and hasattr(ctx.segment, "text"):
                 text = ctx.segment.text
 
-            # Extract source URI for metadata
+            # Extract source URI and display name for metadata
             source_uri = ""
             if hasattr(ctx, "source_uri"):
-                source_uri = ctx.source_uri
+                source_uri = ctx.source_uri or ""
             elif hasattr(ctx, "source"):
-                source_uri = ctx.source
+                source_uri = ctx.source or ""
 
-            # Derive source label and title from URI
+            source_display_name = ""
+            if hasattr(ctx, "source_display_name"):
+                source_display_name = ctx.source_display_name or ""
+
+            # Derive source label and title — check URI, display_name, then chunk text
             source_label = "Unknown"
             title = "Untitled"
-            if source_uri:
-                uri_lower = source_uri.lower()
-                if "aad" in uri_lower:
+
+            # Use display_name (PDF filename) if available; fall back to URI filename
+            name_for_label = source_display_name or source_uri
+            name_lower = name_for_label.lower()
+
+            if name_for_label:
+                if "aad" in name_lower:
                     source_label = "AAD"
-                elif "statpearls" in uri_lower:
+                elif "statpearls" in name_lower or "stat_pearls" in name_lower:
                     source_label = "StatPearls"
-                elif "jaadcr" in uri_lower or "jaad" in uri_lower:
+                elif "jaadcr" in name_lower or "jaad" in name_lower or "case_report" in name_lower:
                     source_label = "JAADCR"
 
                 # Use filename as title
-                parts = source_uri.rstrip("/").split("/")
+                parts = name_for_label.rstrip("/").split("/")
                 if parts:
                     filename = parts[-1]
-                    title = filename.replace("_", " ").replace(".txt", "").replace(".md", "")
+                    title = (filename
+                             .replace("_", " ")
+                             .replace(".txt", "").replace(".md", "")
+                             .replace(".pdf", "").replace(".PDF", ""))
+
+            # If still unknown, check the chunk text itself for source keywords
+            if source_label == "Unknown" and text:
+                text_lower = text.lower()
+                if "american academy of dermatology" in text_lower or ("aad" in text_lower and "guideline" in text_lower):
+                    source_label = "AAD"
+                elif "statpearls" in text_lower:
+                    source_label = "StatPearls"
+                elif "jaad case report" in text_lower or "jaad: case rep" in text_lower:
+                    source_label = "JAADCR"
 
             documents.append(
                 RetrievedDocument(

@@ -11,30 +11,15 @@ Input (12 CSV files in --analysis-dir):
     Where DATASET ∈ {NEJM, JDCR}, model ∈ {27b-it, 4b-it, 1.5-4b-it},
     format ∈ {without_options, with_options}
 
-Output (6 PNG files in --analysis-dir):
-    Per dataset (NEJM and JDCR), 3 plots each:
+Output (per dataset, 3 plots each saved as JPEG + PDF):
+    {DATASET}_consolidated_accuracy.{jpg,pdf}
+    {DATASET}_consolidated_safety_history.{jpg,pdf}
+    {DATASET}_consolidated_pause_heatmap.{jpg,pdf}
 
-    1. {DATASET}_consolidated_accuracy.png
-       Grouped bar chart — original variant (complete cases) only.
-       Bars: Top-1 / Top-3 / Top-4 / Any-Rank accuracy.
-       Line overlay (secondary axis): Pause Rate on complete cases.
-       Purpose: Shows raw diagnostic accuracy comparison across all 6 model+format combos.
-
-    2. {DATASET}_consolidated_safety_history.png
-       Side-by-side bar chart — history_only variant (text only, no image/exam).
-       Bars: Pause Rate (safety metric, higher = safer) + Acc(att) (quality when attempted).
-       Purpose: Isolates safety behavior when only patient history is available — the
-       most clinically common "incomplete data" scenario. High pause rate here is desired.
-
-    3. {DATASET}_consolidated_pause_heatmap.png
-       Heatmap — all 4 incomplete variants (history_only, image_only, exam_only, exam_restricted).
-       Rows: context variants. Columns: 6 model+format combinations.
-       Color: Pause rate (0-100%). Darker = more pausing = safer behavior.
-       Purpose: Shows at a glance whether the system consistently pauses across ALL
-       types of missing data, not just one variant.
+Style: Publication-quality. Minimum font size 14. 300 dpi JPEG + vector PDF.
 
 Acc(att) metric:
-    Standard Top-1 accuracy penalizes pausing (paused case = wrong). Acc(att) removes
+    Standard Top-1 accuracy penalizes pausing (paused = wrong). Acc(att) removes
     paused cases from the denominator, showing diagnostic quality when the model does
     attempt a diagnosis. A high pause rate + high Acc(att) = ideal safety + quality.
 
@@ -51,20 +36,36 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-sns.set_theme(style="whitegrid")
+# ── Publication style ─────────────────────────────────────────────────────────
+# All font sizes >= 14 for readability in printed/PDF format.
+plt.rcParams.update({
+    'font.size':          14,
+    'axes.titlesize':     16,
+    'axes.labelsize':     14,
+    'xtick.labelsize':    14,
+    'ytick.labelsize':    14,
+    'legend.fontsize':    13,
+    'axes.titleweight':   'bold',
+    'figure.dpi':         150,
+    'savefig.dpi':        300,
+})
+sns.set_theme(style="whitegrid", font_scale=1.2)
 
-# ── Label helpers ────────────────────────────────────────────────────────────
+# ── Label helpers ─────────────────────────────────────────────────────────────
 
+# Correct MedGemma variant names: lowercase b, lowercase -it suffix
 MODEL_SHORT = {
-    'medgemma-27b-it':    '27B',
-    'medgemma-4b-it':     '4B',
-    'medgemma-1.5-4b-it': '1.5-4B',
+    'medgemma-27b-it':    '27b-it',
+    'medgemma-4b-it':     '4b-it',
+    'medgemma-1.5-4b-it': '1.5-4b-it',
 }
 
 INCOMPLETE_VARIANTS = ['history_only', 'image_only', 'exam_only', 'exam_restricted']
@@ -74,6 +75,22 @@ VARIANT_LABELS = {
     'exam_only':       'Exam\nOnly',
     'exam_restricted': 'Exam\nRestricted',
 }
+
+
+def _save_fig(base_path: str) -> None:
+    """
+    Save the current matplotlib figure as both JPEG (300 dpi) and PDF (vector).
+
+    Args:
+        base_path: Full path without extension (e.g. 'logs/all_analysis/JDCR_consolidated_accuracy')
+    """
+    jpg_path = base_path + '.jpg'
+    pdf_path = base_path + '.pdf'
+    plt.savefig(jpg_path, dpi=300, bbox_inches='tight', format='jpeg')
+    plt.savefig(pdf_path, bbox_inches='tight', format='pdf')
+    plt.close()
+    print(f"  Saved: {jpg_path}")
+    print(f"  Saved: {pdf_path}")
 
 
 def _extract_model_key(filename: str) -> str:
@@ -103,10 +120,10 @@ def _extract_info(filename: str) -> dict:
     Returns a dict with:
         dataset   : 'NEJM' or 'JDCR' (uppercased from filename prefix)
         model_key : full model key (e.g., 'medgemma-27b-it')
-        short     : abbreviated model label (e.g., '27B')
+        short     : abbreviated model label (e.g., '27b-it')
         fmt       : 'w/ opts' or 'no opts'
         label     : two-line plot label combining short name + format
-                    (e.g., '27B\\nw/ opts') for use as x-axis tick label
+                    (e.g., '27b-it\\nw/ opts') for use as x-axis tick label
     """
     base = os.path.basename(filename).replace('_metrics_by_variant.csv', '')
     dataset = base.split('_')[0].upper()
@@ -166,7 +183,7 @@ def _acc_att(top1_pct: float, pause_pct: float, total: int = 25) -> float:
     return min(100.0, correct / attempted * 100)
 
 
-# ── Plot 1: Accuracy Overview (original variant) ─────────────────────────────
+# ── Plot 1: Accuracy Overview (original variant) ──────────────────────────────
 
 def plot_accuracy_overview(entries: list, dataset: str, out_dir: str):
     """
@@ -174,68 +191,63 @@ def plot_accuracy_overview(entries: list, dataset: str, out_dir: str):
     Bars: Top-1, Top-3, Top-4, Any-Rank.
     Line overlay: Pause Rate.
     """
-    labels  = [e['label']      for e in entries]
-    top1    = [e['top1']       for e in entries]
-    top3    = [e['top3']       for e in entries]
-    top4    = [e['top4']       for e in entries]
-    anyrank = [e['any_rank']   for e in entries]
-    pause   = [e['pause']      for e in entries]
+    labels  = [e['label']    for e in entries]
+    top1    = [e['top1']     for e in entries]
+    top3    = [e['top3']     for e in entries]
+    top4    = [e['top4']     for e in entries]
+    anyrank = [e['any_rank'] for e in entries]
+    pause   = [e['pause']    for e in entries]
 
     n = len(labels)
     x = np.arange(n)
     bar_w = 0.18
 
-    fig, ax1 = plt.subplots(figsize=(14, 6))
+    fig, ax1 = plt.subplots(figsize=(14, 7))
 
-    offsets = [-1.5, -0.5, 0.5, 1.5]
-    colors  = ['#4C72B0', '#55A868', '#DD8452', '#8172B3']
+    offsets    = [-1.5, -0.5, 0.5, 1.5]
+    colors     = ['#4C72B0', '#55A868', '#DD8452', '#8172B3']
     bar_labels = ['Top-1', 'Top-3', 'Top-4', 'Any-Rank']
 
     bars = []
-    for i, (off, col, lbl, vals) in enumerate(zip(offsets, colors, bar_labels,
-                                                    [top1, top3, top4, anyrank])):
+    for off, col, lbl, vals in zip(offsets, colors, bar_labels,
+                                   [top1, top3, top4, anyrank]):
         b = ax1.bar(x + off * bar_w, vals, bar_w, label=lbl, color=col, alpha=0.85)
         bars.append(b)
 
-    # Pause rate as dashed line on secondary axis
     ax2 = ax1.twinx()
-    ax2.plot(x, pause, 'D--', color='#C44E52', linewidth=2, markersize=7,
+    ax2.plot(x, pause, 'D--', color='#C44E52', linewidth=2.5, markersize=8,
              label='Pause Rate', zorder=5)
-    ax2.set_ylabel('Pause Rate (%)', color='#C44E52', fontsize=11)
-    ax2.tick_params(axis='y', labelcolor='#C44E52')
+    ax2.set_ylabel('Pause Rate (%)', color='#C44E52', fontsize=14)
+    ax2.tick_params(axis='y', labelcolor='#C44E52', labelsize=14)
     ax2.set_ylim(0, 110)
 
     ax1.set_xticks(x)
-    ax1.set_xticklabels(labels, fontsize=10)
+    ax1.set_xticklabels(labels, fontsize=14)
     ax1.set_ylim(0, 110)
-    ax1.set_ylabel('Accuracy (%)', fontsize=12)
-    ax1.set_xlabel('Model  ·  Format', fontsize=11)
+    ax1.set_ylabel('Accuracy (%)', fontsize=14)
+    ax1.set_xlabel('Model  ·  Format', fontsize=14)
     ax1.set_title(f'{dataset} — Diagnostic Accuracy (Original Variant, Complete Clinical Data)',
-                  fontsize=13, fontweight='bold', pad=14)
+                  fontsize=16, fontweight='bold', pad=14)
 
-    # Combined legend
     handles1 = [mpatches.Patch(color=c, alpha=0.85, label=l)
                 for c, l in zip(colors, bar_labels)]
-    line_handle = plt.Line2D([0], [0], color='#C44E52', linewidth=2,
-                             linestyle='--', marker='D', markersize=7, label='Pause Rate')
-    ax1.legend(handles=handles1 + [line_handle], loc='upper left', fontsize=9, framealpha=0.9)
+    line_handle = plt.Line2D([0], [0], color='#C44E52', linewidth=2.5,
+                             linestyle='--', marker='D', markersize=8, label='Pause Rate')
+    ax1.legend(handles=handles1 + [line_handle], loc='upper left', fontsize=13, framealpha=0.9)
 
-    # Value labels on bars
     for b_group in bars:
         for rect in b_group:
             h = rect.get_height()
             if h > 0:
                 ax1.text(rect.get_x() + rect.get_width() / 2, h + 1,
-                         f'{h:.0f}%', ha='center', va='bottom', fontsize=7)
+                         f'{h:.0f}%', ha='center', va='bottom', fontsize=9)
 
     plt.tight_layout()
-    out_path = os.path.join(out_dir, f'{dataset.upper()}_consolidated_accuracy.png')
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved: {out_path}")
+    base = os.path.join(out_dir, f'{dataset.upper()}_consolidated_accuracy')
+    _save_fig(base)
 
 
-# ── Plot 2: Safety — history_only ────────────────────────────────────────────
+# ── Plot 2: Safety — history_only ─────────────────────────────────────────────
 
 def plot_safety_history(entries: list, dataset: str, out_dir: str):
     """
@@ -243,49 +255,46 @@ def plot_safety_history(entries: list, dataset: str, out_dir: str):
     Primary: Pause Rate (key safety metric, higher = safer).
     Secondary: Acc(att) — accuracy among cases that weren't paused.
     """
-    labels   = [e['label']   for e in entries]
-    pause    = [e['pause']   for e in entries]
-    acc_att  = [e['acc_att'] for e in entries]
+    labels  = [e['label']   for e in entries]
+    pause   = [e['pause']   for e in entries]
+    acc_att = [e['acc_att'] for e in entries]
 
     n = len(labels)
     x = np.arange(n)
     bar_w = 0.35
 
-    fig, ax = plt.subplots(figsize=(13, 6))
+    fig, ax = plt.subplots(figsize=(13, 7))
 
     b1 = ax.bar(x - bar_w / 2, pause,   bar_w, label='Pause Rate (safety ↑)',
                 color='#2196F3', alpha=0.85)
     b2 = ax.bar(x + bar_w / 2, acc_att, bar_w, label='Acc among attempted',
                 color='#FF9800', alpha=0.85)
 
-    # Ideal pause rate line
-    ax.axhline(100, color='#2196F3', linewidth=1.2, linestyle=':', alpha=0.5,
+    ax.axhline(100, color='#2196F3', linewidth=1.5, linestyle=':', alpha=0.5,
                label='100% pause (ideal)')
 
     for bars, vals in [(b1, pause), (b2, acc_att)]:
         for rect, v in zip(bars, vals):
             if v > 0:
                 ax.text(rect.get_x() + rect.get_width() / 2, v + 1,
-                        f'{v:.0f}%', ha='center', va='bottom', fontsize=8)
+                        f'{v:.0f}%', ha='center', va='bottom', fontsize=11)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=10)
+    ax.set_xticklabels(labels, fontsize=14)
     ax.set_ylim(0, 115)
-    ax.set_ylabel('Rate / Accuracy (%)', fontsize=12)
-    ax.set_xlabel('Model  ·  Format', fontsize=11)
-    ax.set_title(f'{dataset} — Safety Behavior (history_only Variant)\n'
+    ax.set_ylabel('Rate / Accuracy (%)', fontsize=14)
+    ax.set_xlabel('Model  ·  Format', fontsize=14)
+    ax.set_title(f'{dataset} — Safety Behavior (History-Only Variant)\n'
                  'Higher Pause Rate = safer (system correctly detects missing data)',
-                 fontsize=12, fontweight='bold', pad=12)
-    ax.legend(loc='lower right', fontsize=9, framealpha=0.9)
+                 fontsize=15, fontweight='bold', pad=12)
+    ax.legend(loc='lower right', fontsize=13, framealpha=0.9)
 
     plt.tight_layout()
-    out_path = os.path.join(out_dir, f'{dataset.upper()}_consolidated_safety_history.png')
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved: {out_path}")
+    base = os.path.join(out_dir, f'{dataset.upper()}_consolidated_safety_history')
+    _save_fig(base)
 
 
-# ── Plot 3: Pause Rate Heatmap (all incomplete variants) ─────────────────────
+# ── Plot 3: Pause Rate Heatmap (all incomplete variants) ──────────────────────
 
 def plot_pause_heatmap(entries_by_variant: dict, dataset: str, out_dir: str):
     """
@@ -301,39 +310,171 @@ def plot_pause_heatmap(entries_by_variant: dict, dataset: str, out_dir: str):
         for v in INCOMPLETE_VARIANTS
     ]).T  # shape: (n_models, n_variants)
 
-    fig, ax = plt.subplots(figsize=(10, max(5, len(model_labels) * 0.7 + 2)))
+    fig, ax = plt.subplots(figsize=(11, max(6, len(model_labels) * 0.9 + 2)))
 
     im = ax.imshow(data, cmap='YlGn', aspect='auto', vmin=0, vmax=100)
     cbar = plt.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
-    cbar.set_label('Pause Rate (%)', fontsize=11)
+    cbar.set_label('Pause Rate (%)', fontsize=14)
+    cbar.ax.tick_params(labelsize=13)
 
     ax.set_xticks(range(len(col_labels)))
-    ax.set_xticklabels(col_labels, fontsize=10)
+    ax.set_xticklabels(col_labels, fontsize=14)
     ax.set_yticks(range(len(model_labels)))
-    ax.set_yticklabels(model_labels, fontsize=10)
+    ax.set_yticklabels(model_labels, fontsize=14)
 
-    # Annotate cells
     for i in range(len(model_labels)):
         for j in range(len(col_labels)):
             v = data[i, j]
             text_color = 'black' if v < 70 else 'white'
             ax.text(j, i, f'{v:.0f}%', ha='center', va='center',
-                    fontsize=11, fontweight='bold', color=text_color)
+                    fontsize=13, fontweight='bold', color=text_color)
 
     ax.set_title(f'{dataset} — Pause Rate Across All Incomplete Variants\n'
                  '(Higher = safer: system detects missing data and pauses)',
-                 fontsize=12, fontweight='bold', pad=12)
-    ax.set_xlabel('Missing-Data Variant', fontsize=11)
-    ax.set_ylabel('Model  ·  Format', fontsize=11)
+                 fontsize=15, fontweight='bold', pad=12)
+    ax.set_xlabel('Missing-Data Variant', fontsize=14)
+    ax.set_ylabel('Model  ·  Format', fontsize=14)
 
     plt.tight_layout()
-    out_path = os.path.join(out_dir, f'{dataset.upper()}_consolidated_pause_heatmap.png')
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved: {out_path}")
+    base = os.path.join(out_dir, f'{dataset.upper()}_consolidated_pause_heatmap')
+    _save_fig(base)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Plot 4: Safety Governor — Quadrant Scatter Map ────────────────────────────
+
+def plot_safety_governor_scatter(file_entries: list, dataset: str, out_dir: str):
+    """
+    Quadrant Safety Map: scatter plot showing the inverse relationship between
+    diagnostic accuracy on complete data (X-axis) and average pause rate on
+    incomplete data (Y-axis).
+
+    Each point is labeled directly with a short tag. Labels are placed at
+    manually tuned positions with thin connector lines to avoid all overlaps.
+    Threshold lines at pause=85% and acc=50% mark the minimum safety/utility bars.
+    Diagonal x+y=100 shows that all points have combined safety+accuracy > baseline.
+    """
+    from matplotlib.lines import Line2D
+
+    # Short display tags — consistent with "no opts" / "opts" used throughout paper
+    SHORT_TAG = {
+        ('medgemma-27b-it',    'no opts'):  '27b  no opts',
+        ('medgemma-27b-it',    'w/ opts'):  '27b  opts',
+        ('medgemma-4b-it',     'no opts'):  '4b  no opts',
+        ('medgemma-4b-it',     'w/ opts'):  '4b  opts',
+        ('medgemma-1.5-4b-it', 'no opts'):  '1.5b  no opts',
+        ('medgemma-1.5-4b-it', 'w/ opts'):  '1.5b  opts',
+    }
+
+    # Manually tuned label anchor positions (data coords) chosen to avoid overlaps.
+    # All 6 points cluster in x=[28-76], y=[87-94].
+    # Points: 27b-noopt(28,90), 4b-noopt(36,94), 1.5b-noopt(44,90),
+    #         27b-opts(56,88),   4b-opts(64,87),  1.5b-opts(76,92)
+    LABEL_XY = {
+        ('medgemma-27b-it',    'no opts'):  (6,   90,  'left'),   # far left
+        ('medgemma-4b-it',     'no opts'):  (24,  97,  'left'),   # upper-left of cluster
+        ('medgemma-1.5-4b-it', 'no opts'):  (40,  83,  'right'),  # below, slightly right
+        ('medgemma-27b-it',    'w/ opts'):  (44,  95,  'right'),  # upper-left of point
+        ('medgemma-4b-it',     'w/ opts'):  (68,  80,  'left'),   # below point
+        ('medgemma-1.5-4b-it', 'w/ opts'):  (64,  86,  'right'),  # below-left of point
+    }
+
+    acc_complete     = []
+    pause_incomplete = []
+    model_keys       = []
+    fmt_flags        = []
+
+    for e in file_entries:
+        model_keys.append(e['model_key'])
+        fmt_flags.append(e['fmt'])
+
+        orig = e['data'].get('original', {})
+        acc_complete.append(float(orig.get('Top-1 Acc (%)', 0)))
+
+        inc_pauses = []
+        for v in INCOMPLETE_VARIANTS:
+            row = e['data'].get(v, {})
+            if row:
+                inc_pauses.append(float(row.get('Pause Rate (%)', 0)))
+        pause_incomplete.append(sum(inc_pauses) / len(inc_pauses) if inc_pauses else 0.0)
+
+    fig, ax = plt.subplots(figsize=(11, 9))
+
+    # ── Threshold guide lines ──────────────────────────────────────────────────
+    ax.axhline(85, color='#999999', linewidth=1.4, linestyle=':', alpha=0.75, zorder=2)
+    ax.text(2, 86.2, 'pause = 85%  (safety bar)', fontsize=11, color='#666666', alpha=0.85)
+
+    ax.axvline(50, color='#999999', linewidth=1.4, linestyle=':', alpha=0.75, zorder=2)
+    ax.text(51.2, 4, 'acc = 50%\n(utility bar)', fontsize=11, color='#666666', alpha=0.85)
+
+    # ── Diagonal: x + y = 100 ─────────────────────────────────────────────────
+    x_line = np.linspace(0, 100, 300)
+    y_line = 100 - x_line
+    ax.plot(x_line, y_line, '--', color='#777777', linewidth=1.8, alpha=0.6, zorder=2)
+    ax.text(63, 33, 'x + y = 100\n(above = safety + accuracy > baseline)',
+            fontsize=10, color='#666666', alpha=0.8, rotation=-42, ha='center')
+
+    # ── Ideal zone shading — text placed at very top, clear of all data points ─
+    ax.fill_between(x_line, np.maximum(y_line, 85), 100,
+                    where=(x_line >= 50), alpha=0.10, color='#4CAF50', zorder=1)
+    ax.text(66, 100.5,
+            'Diagnose when complete  +  Pause when incomplete',
+            fontsize=11.5, color='#1B5E20', fontstyle='italic',
+            alpha=0.92, ha='center', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                      alpha=0.7, edgecolor='none'))
+
+    # ── Problematic zone label ─────────────────────────────────────────────────
+    ax.text(18, 18, 'Problematic Zone', fontsize=12, color='#B71C1C',
+            fontstyle='italic', alpha=0.65, ha='center')
+
+    # ── Colors per model family ────────────────────────────────────────────────
+    model_colors = {
+        'medgemma-27b-it':    '#1565C0',
+        'medgemma-4b-it':     '#2E7D32',
+        'medgemma-1.5-4b-it': '#B71C1C',
+    }
+
+    for acc, pause, mkey, fmt in zip(acc_complete, pause_incomplete,
+                                     model_keys, fmt_flags):
+        color  = model_colors.get(mkey, '#555555')
+        marker = 's' if fmt == 'w/ opts' else 'o'
+        ax.scatter(acc, pause, color=color, marker=marker,
+                   s=250, zorder=5, edgecolors='white', linewidths=1.0)
+
+        tag = SHORT_TAG.get((mkey, fmt), mkey)
+        tx, ty, ha = LABEL_XY.get((mkey, fmt), (acc + 4, pause + 2, 'left'))
+
+        ax.annotate(
+            tag, xy=(acc, pause), xycoords='data',
+            xytext=(tx, ty), textcoords='data',
+            fontsize=11.5, color=color, fontweight='bold', ha=ha, va='center',
+            arrowprops=dict(arrowstyle='-', color=color, lw=0.8, alpha=0.45),
+        )
+
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 104)   # extra headroom for top label
+    ax.set_xlabel('Top-1 Accuracy on Complete Cases (%)', fontsize=14)
+    ax.set_ylabel('Avg Pause Rate on Incomplete Cases (%)', fontsize=14)
+    ax.set_title(
+        f'{dataset} - Safety Governor: Quadrant Safety Map\n'
+        'o = no opts   sq = opts   |   All points in ideal zone',
+        fontsize=13, fontweight='bold', pad=12)
+
+    # Minimal legend: marker shapes only (model colors are self-labeled on points)
+    legend_handles = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#555555',
+               markersize=12, label='No options  (o)'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#555555',
+               markersize=12, label='With MCQ options  (sq)'),
+    ]
+    ax.legend(handles=legend_handles, loc='lower left', fontsize=12, framealpha=0.90)
+
+    plt.tight_layout()
+    base = os.path.join(out_dir, f'{dataset.upper()}_safety_governor_scatter')
+    _save_fig(base)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 # Canonical model+format ordering for consistent X-axis
 _SORT_KEY = {
@@ -347,7 +488,7 @@ _SORT_KEY = {
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate consolidated comparison plots")
+    parser = argparse.ArgumentParser(description="Generate consolidated comparison plots (publication style)")
     parser.add_argument('--analysis-dir', default='logs/all_analysis')
     args = parser.parse_args()
 
@@ -374,6 +515,11 @@ def main():
 
         # Sort by canonical model+format order
         file_entries.sort(key=lambda e: _SORT_KEY.get((e['model_key'], e['fmt']), 99))
+
+        # NEJM "with options" run was incomplete (orchestrator exhausted for 1.5-4b-it).
+        # Only show "no options" results for NEJM plots to avoid misleading numbers.
+        if dataset == 'NEJM':
+            file_entries = [e for e in file_entries if e['fmt'] == 'no opts']
 
         # ── Plot 1: Original variant accuracy ───────────────────────────────
         acc_entries = []
@@ -430,6 +576,10 @@ def main():
             plot_pause_heatmap(entries_by_variant, dataset, analysis_dir)
         else:
             print(f"  Skipping heatmap for {dataset} — some variants missing")
+
+        # ── Plot 4: Safety governor scatter (JDCR only — official evaluation) ─
+        if dataset == 'JDCR':
+            plot_safety_governor_scatter(file_entries, dataset, analysis_dir)
 
     print("\nDone.")
 

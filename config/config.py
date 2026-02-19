@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     chunk_size: int = int(os.getenv("CHUNK_SIZE", "512"))
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "50"))
 
+    # Active agent model for Gradio app (overridable via .env or environment variable)
+    agent_model: str = os.getenv("AGENT_MODEL", "medgemma-vertex")
+
     # Vertex AI RAG Configuration
     rag_backend: str = os.getenv("RAG_BACKEND", "chroma")  # Options: "chroma" or "vertex"
     vertex_rag_location: str = os.getenv("VERTEX_RAG_LOCATION", "us-central1")

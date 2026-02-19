@@ -80,6 +80,16 @@ from config.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Module-level dict to pass MedGemma tool outputs back to run_async().
+# ADK runs tools in a thread pool (different thread from run_async),
+# so threading.local() doesn't work — use a plain shared dict instead.
+# Safe because the UI processes one request at a time.
+_run_outputs: Dict[str, Any] = {
+    "last_triage_output": None,
+    "last_research_context": None,
+    "last_diagnostic_output": None,
+}
+
 
 def _sanitize_response(text: str) -> str:
     """
@@ -121,6 +131,17 @@ from src.agents.models.medgemma_adapter import MedGemmaAdapter
 _medgemma_specialist = None
 _agent_model_choice = "medgemma"  # Global: "medgemma" or "gemini"
 
+def _specialist_display_name() -> str:
+    """Return the actual model display name based on current _agent_model_choice."""
+    names = {
+        "medgemma-vertex":       "google/medgemma-1.5-4b-it (Vertex AI)",
+        "medgemma-1.5-4b":       "google/medgemma-1.5-4b-it",
+        "medgemma-hf":           "google/medgemma-1.5-4b-it (HF)",
+        "medgemma":              "google/medgemma-27b-it",
+        "gemini":                "gemini (baseline)",
+    }
+    return names.get(_agent_model_choice, _agent_model_choice)
+
 def _get_medgemma_specialist():
     """
     Get or create specialist for clinical reasoning (lazy initialization).
@@ -161,6 +182,27 @@ def _get_medgemma_specialist():
                 project_id=vertex_config["project_id"],
                 region=vertex_config["region"],
                 endpoint_id=vertex_config["endpoint_id"]
+            )
+        return _medgemma_specialist
+
+    # Use MedGemma-1.5-4B-IT locally on GPU (weights cached from login node)
+    if _agent_model_choice == "medgemma-1.5-4b":
+        logger.info("Using MedGemma-1.5-4B-IT for agent reasoning (local GPU, cached weights)")
+        if _medgemma_specialist is None or not isinstance(_medgemma_specialist, MedGemmaAdapter):
+            _medgemma_specialist = MedGemmaAdapter(
+                model_id="google/medgemma-1.5-4b-it",
+                api_key=settings.huggingface_api_key
+            )
+        return _medgemma_specialist
+
+    # Use MedGemma via HuggingFace Inference API (serverless, no local GPU)
+    if _agent_model_choice == "medgemma-hf":
+        from src.agents.models.hf_inference_adapter import HFInferenceAdapter
+        logger.info("Using MedGemma-1.5-4B-IT via HuggingFace Inference API (serverless)")
+        if _medgemma_specialist is None or not isinstance(_medgemma_specialist, HFInferenceAdapter):
+            _medgemma_specialist = HFInferenceAdapter(
+                model_id="google/medgemma-1.5-4b-it",
+                api_key=settings.huggingface_api_key
             )
         return _medgemma_specialist
 
@@ -237,68 +279,40 @@ def analyze_case_completeness(
     duration: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Analyze a clinical case for data completeness.
+    Collect all available clinical data and pass it to MedGemma for evaluation.
 
-    Args:
-        history: Patient history text
-        physical_exam: Physical examination findings
-        image_available: Whether clinical images are available
-        patient_age: Patient age in years
-        patient_gender: Patient gender
-        duration: Duration of symptoms
+    NOTE: This function does NOT judge completeness — it simply assembles the
+    full case text so MedGemma can decide for itself whether there is enough
+    information to proceed with diagnosis.
 
     Returns:
-        Dict with missing data analysis and clarification questions
+        Dict with the combined case text for MedGemma triage analysis
     """
     logger.info("Tool called: analyze_case_completeness")
 
-    missing_data = []
-    questions = []
+    # Combine all available text into one block for MedGemma to evaluate
+    parts = []
+    if history:
+        parts.append(history.strip())
+    if physical_exam:
+        parts.append(physical_exam.strip())
+    full_case_text = "\n\n".join(parts)
 
-    # Check critical fields
-    if not history or len(history.strip()) < 10:
-        missing_data.append("history")
-        questions.append("Can you provide the patient's chief complaint and symptom history?")
+    if not full_case_text:
+        logger.info("Triage: no case text provided at all")
+        return {
+            "full_case_text": "",
+            "has_sufficient_context": False,
+            "reasoning": "No case text provided. Please describe the patient case."
+        }
 
-    if not physical_exam and not image_available:
-        missing_data.append("physical_exam_or_image")
-        questions.append("Can you describe the physical examination findings or provide clinical images?")
-
-    if not patient_age:
-        missing_data.append("patient_age")
-        questions.append("What is the patient's age?")
-
-    if not duration:
-        missing_data.append("duration")
-        questions.append("How long have the symptoms been present?")
-
-    # Determine if we can proceed
-    has_sufficient_context = (
-        bool(history) and
-        (bool(physical_exam) or image_available) and
-        bool(patient_age)
-    )
-
-    result = {
-        "missing_data": missing_data,
-        "clarification_questions": questions,
-        "has_sufficient_context": has_sufficient_context,
-        "reasoning": _build_triage_reasoning(missing_data, has_sufficient_context)
+    logger.info(f"Triage: assembled case text ({len(full_case_text)} chars) for MedGemma evaluation")
+    return {
+        "full_case_text": full_case_text,
+        "has_sufficient_context": True,  # MedGemma will make the final call
+        "reasoning": "Case text assembled. MedGemma will evaluate clinical completeness."
     }
 
-    logger.info(f"Triage analysis: {len(missing_data)} missing items, sufficient_context={has_sufficient_context}")
-
-    return result
-
-
-def _build_triage_reasoning(missing_data: List[str], has_sufficient: bool) -> str:
-    """Build reasoning explanation for triage result."""
-    if has_sufficient:
-        return "Sufficient clinical data available to proceed with diagnosis. All critical fields present."
-    else:
-        missing_str = ", ".join(missing_data)
-        return f"Cannot proceed with confident diagnosis. Missing critical data: {missing_str}. " \
-               f"In dermatology, both patient history and visual assessment (exam or image) are essential."
 
 
 # ============================================================================
@@ -323,43 +337,51 @@ def medgemma_triage_analysis(
     """
     logger.info("Calling MedGemma Specialist for triage analysis")
 
-    prompt = f"""You are an expert medical triage specialist analyzing a dermatology case.
+    prompt = f"""You are an expert dermatology triage specialist.
 
-Case Summary:
+FULL CASE TEXT:
 {case_summary}
 
-Missing Data Identified:
-{', '.join(missing_items) if missing_items else 'None - case appears complete'}
+YOUR TASK:
+Read the case text above carefully. YOU decide whether there is sufficient clinical information to make a diagnosis.
 
-Your Task:
-1. If data is missing: Generate specific, clinically relevant clarification questions
-2. If data is complete: Confirm we can proceed with diagnosis
-3. Explain WHY each missing item is critical for accurate dermatological diagnosis
+Judge by CONTENT, not format. A clinical narrative that describes the patient's demographics, symptoms, and lesion characteristics IS sufficient — even if it was entered as free text rather than structured fields.
 
-Provide your analysis as a structured response."""
+Decision rules:
+- If the case contains enough clinical detail to attempt a differential diagnosis → respond with: "SUFFICIENT: Proceed with diagnosis." followed by a brief summary of key clinical findings.
+- If genuinely critical information is missing (e.g., no description of the lesion at all, completely unknown patient) → ask specific, clinically meaningful questions. Be precise: ask for what you actually need, not generic fields.
+
+Do NOT ask for information that is already present in the case text."""
 
     try:
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
-            max_tokens=1000,  # Increased for detailed completeness analysis
+            max_tokens=500,  # Keep triage concise — long output bloats diagnostic prompt input
             temperature=0.0
         )
         response = _sanitize_response(response)
 
+        # Store in thread-local so run_async() can retrieve MedGemma's actual output
+        # (Gemini will write its own bland summary in the text event — we need the real thing)
+        _run_outputs["last_triage_output"] = response
+
         return {
             "medgemma_analysis": response,
             "missing_items": missing_items,
-            "specialist_used": "MedGemma-27B"
+            "specialist_used": _specialist_display_name()
         }
     except Exception as e:
         logger.error(f"MedGemma triage analysis failed: {e}", exc_info=True)
         import traceback
         error_details = traceback.format_exc()
+        error_msg = f"Error calling MedGemma triage: {e}"
+        # Store error so run_async() priority chain doesn't fall back to ghost ADK events
+        _run_outputs["last_triage_output"] = error_msg
         return {
             "medgemma_analysis": f"Error calling MedGemma: {e}\n\nDetails:\n{error_details}",
             "missing_items": missing_items,
-            "specialist_used": "MedGemma-27B (failed)"
+            "specialist_used": _specialist_display_name() + " (failed)"
         }
 
 
@@ -407,15 +429,19 @@ Provide a structured synthesis focusing on differential diagnosis support."""
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
-            max_tokens=2000,  # Increased for comprehensive guideline synthesis
+            max_tokens=1000,
             temperature=0.0
         )
         response = _sanitize_response(response)
 
+        # Store in thread-local so medgemma_clinical_diagnosis can use it directly
+        # (Gemini passes garbage fragments as research_context — bypass that entirely)
+        _run_outputs["last_research_context"] = response
+
         return {
             "medgemma_synthesis": response,
             "guidelines_count": len(retrieved_guidelines),
-            "specialist_used": "MedGemma-27B"
+            "specialist_used": _specialist_display_name()
         }
     except Exception as e:
         logger.error(f"MedGemma guideline synthesis failed: {e}", exc_info=True)
@@ -424,92 +450,210 @@ Provide a structured synthesis focusing on differential diagnosis support."""
         return {
             "medgemma_synthesis": f"Error calling MedGemma: {e}\n\nDetails:\n{error_details}",
             "guidelines_count": len(retrieved_guidelines),
-            "specialist_used": "MedGemma-27B (failed)"
+            "specialist_used": _specialist_display_name() + " (failed)"
         }
 
 
 def medgemma_clinical_diagnosis(
-    case_data: str,
-    research_context: str,
-    triage_notes: str = ""
+    case_data: str
 ) -> Dict[str, Any]:
     """
     Call MedGemma specialist for final clinical diagnosis and SOAP note generation.
 
-    This is the PRIMARY clinical reasoning task - delegates to MedGemma-27B.
+    This is the PRIMARY clinical reasoning task — delegates all medical reasoning to
+    MedGemma (27B, 4B, or 1.5-4B-IT via Vertex AI depending on agent_model_choice).
+
+    Parameter Bypass Design:
+    ────────────────────────
+    The `triage_notes` and `research_context` parameters from Gemini are intentionally
+    bypassed. When Gemini calls this tool, it passes its own summarized/truncated
+    fragments of the context — not the actual MedGemma outputs from the previous agents.
+    Instead, we read directly from `_run_outputs`, a module-level dict that stores the
+    raw MedGemma outputs from `medgemma_triage_analysis` and `medgemma_guideline_synthesis`
+    as they ran. This guarantees MedGemma sees the real clinical context, not Gemini's
+    paraphrase.
+
+    Conditional Prompt Strategy (Feb 2026 fix):
+    ────────────────────────────────────────────
+    Previously, the prompt led with triage notes and told MedGemma to "READ TRIAGE
+    NOTES FIRST". This caused MedGemma to narrate/echo the triage notes rather than
+    generating a SOAP note (it treated the instruction as a reading comprehension task).
+
+    The fix: detect whether triage said SUFFICIENT or INSUFFICIENT, then branch:
+    - SUFFICIENT → clean, direct "Generate a complete SOAP note" prompt with case data
+      and guidelines. No triage notes in the prompt at all — avoids the echo problem.
+    - INSUFFICIENT → short prompt asking MedGemma to output the clarifying questions
+      identified during triage, with case data for reference.
+
+    Recovery Path Compatibility:
+    ─────────────────────────────
+    This function is also called directly by the run_async() recovery path when Gemini
+    stops the pipeline before DiagnosticAgent runs (e.g., after empty RAG results).
+    In that case, `_run_outputs` are restored to the saved local copies before this
+    call, ensuring the same context is available as in the normal pipeline.
 
     Args:
-        case_data: Complete clinical case information
-        research_context: Synthesized guidelines from research agent
-        triage_notes: Notes from triage agent
+        case_data: Complete clinical case information (the original user message or
+                   formatted case text — used directly in the prompt).
+                   research_context and triage_notes are intentionally removed from
+                   the signature: they are read from _run_outputs internally, and
+                   removing them prevents Gemini from generating long JSON function
+                   call arguments that occasionally cause ADK JSON parse errors.
 
     Returns:
-        Dict with MedGemma's SOAP note and diagnosis
+        Dict with keys:
+          - soap_note: MedGemma's SOAP note text (or clarifying questions if incomplete)
+          - specialist_used: Display name of the model that performed clinical reasoning
+          - reasoning_engine: Human-readable engine description
     """
     logger.info("Calling MedGemma Specialist for clinical diagnosis (SOAP note)")
 
-    prompt = f"""You are an expert dermatologist providing a clinical assessment.
+    # Read real MedGemma outputs stored by previous tool calls in the pipeline.
+    # _run_outputs["last_triage_output"] is set by medgemma_triage_analysis().
+    # _run_outputs["last_research_context"] is set by medgemma_guideline_synthesis().
+    # These are authoritative — Gemini's parameter values are bypassed entirely
+    # because Gemini summarizes/truncates context when passing args to this tool.
+    real_triage_notes = _run_outputs.get("last_triage_output") or 'No triage notes.'
+    real_research_context = _run_outputs.get("last_research_context") or 'No guidelines retrieved.'
+    logger.info(f"Using stored triage ({len(real_triage_notes)} chars) and research ({len(real_research_context)} chars)")
 
-Triage Notes:
-{triage_notes if triage_notes else 'Case cleared for diagnosis'}
+    # Route to the appropriate prompt based on triage verdict.
+    # "sufficient" in the triage output means MedGemma-triage found enough data to diagnose.
+    # This check also handles the case where no triage notes exist (default to sufficient
+    # so we always attempt diagnosis when called directly via the recovery path).
+    triage_says_sufficient = (
+        not real_triage_notes
+        or "sufficient" in real_triage_notes.lower()
+        or real_triage_notes.strip().lower().startswith("sufficient")
+    )
 
-Clinical Case Data:
+    if triage_says_sufficient:
+        # ── OPTION A: 8 micro-calls (ACTIVE) ─────────────────────────────────────────
+        # The Vertex one-click-deploy endpoint hard-caps output to ~60-85 chars per call
+        # regardless of max_new_tokens — confirmed via RAW response logging.
+        # Single-call SOAP (Option B) always truncates mid-sentence.
+        # Fix: decompose into 8 focused micro-questions each answerable in ~15-50 chars,
+        # then stitch answers into a formatted SOAP note.
+        ctx = f"Dermatology case: {case_data}"
+        specialist = _get_medgemma_specialist()
+
+        _PREAMBLES = (
+            "here is a brief summary", "here are the", "based on the",
+            "here is the", "the following", "i would recommend", "okay,", "sure,",
+        )
+
+        def _ask(q):
+            raw = specialist.generate(
+                prompt=f"{ctx}\nAnswer in one short sentence only, no preamble: {q}",
+                max_tokens=500,
+                temperature=0.0
+            ).strip()
+            lower = raw.lower()
+            for p in _PREAMBLES:
+                if lower.startswith(p):
+                    cut = raw.find(":")
+                    if cut != -1 and cut < 80:
+                        raw = raw[cut+1:].strip()
+                    break
+            return raw
+
+        primary_dx    = _ask("What is the single most likely dermatological diagnosis? Reply with the diagnosis name only, in English, nothing else.")
+        confidence    = _ask("On a scale of 0.0 to 1.0, how confident are you in this diagnosis? Reply with a single decimal number only, e.g. 0.85")
+        differentials = _ask("List exactly 3 alternative diagnoses in English, separated by commas. Names only, no explanations.")
+        evidence      = _ask("In one English sentence only, which clinical features from the case best support the primary diagnosis?")
+        subjective    = _ask("In one English sentence only, summarize the patient age, chief complaint, and symptom duration.")
+        objective     = _ask("In one English sentence only, describe the lesion morphology, distribution, and color.")
+        tests         = _ask("List the recommended diagnostic tests in English, separated by commas. Names only.")
+        treatment     = _ask("In one English sentence only, what is the first-line treatment and follow-up plan?")
+
+        logger.info(f"SOAP micro-calls complete: dx={primary_dx}, conf={confidence}")
+
+        response = (
+            f"**Subjective (S):**\n{subjective}\n\n"
+            f"**Objective (O):**\n{objective}\n\n"
+            f"**Assessment (A):**\n"
+            f"- Primary Diagnosis: {primary_dx} (Confidence: {confidence})\n"
+            f"- Differentials: {differentials}\n"
+            f"- Supporting Evidence: {evidence}\n\n"
+            f"**Plan (P):**\n"
+            f"- Diagnostics: {tests}\n"
+            f"- Treatment: {treatment}"
+        )
+        # ── END OPTION A ──────────────────────────────────────────────────────────────
+
+        # ── OPTION B: single-call compact format (ChatGPT suggestion — DOES NOT WORK) ──
+        # Tested 2026-02-19: endpoint still truncates at ~70 chars output even with
+        # short prompt. Total context cap is ~60-85 chars output regardless of input size.
+        # Example truncation: "S: A 73-year-old man with a history of receiving" → cut off.
+        #
+        # specialist = _get_medgemma_specialist()
+        # single_prompt = (
+        #     f"Case:\n{case_data}\n\n"
+        #     f"Output exactly in this format:\n"
+        #     f"S: ...\n"
+        #     f"O: ...\n"
+        #     f"A:\n"
+        #     f"- Primary DX: ...\n"
+        #     f"- Confidence (0-1): ...\n"
+        #     f"- Differentials: ...\n"
+        #     f"P:\n"
+        #     f"- Tests: ...\n"
+        #     f"- Treatment: ..."
+        # )
+        # raw_soap = specialist.generate(prompt=single_prompt, max_tokens=800, temperature=0.0).strip()
+        # logger.info(f"SOAP single-call response ({len(raw_soap)} chars)")
+        # response = _sanitize_response(raw_soap)
+        # _run_outputs["last_diagnostic_output"] = response
+        # return {"soap_note": response, "specialist_used": _specialist_display_name(), "reasoning_engine": "MedGemma (single-call compact SOAP)"}
+        # ── END OPTION B ──────────────────────────────────────────────────────────────
+
+        response = _sanitize_response(response)
+        _run_outputs["last_diagnostic_output"] = response
+        return {
+            "soap_note": response,
+            "specialist_used": _specialist_display_name(),
+            "reasoning_engine": "MedGemma (8 micro-calls, stitched SOAP)"
+        }
+    else:
+        prompt = f"""You are an expert dermatology triage specialist.
+
+CLINICAL CASE:
 {case_data}
 
-Evidence-Based Research Context:
-{research_context}
+TRIAGE ASSESSMENT:
+{real_triage_notes}
 
-Your Task:
-Generate a complete SOAP note (Subjective, Objective, Assessment, Plan) with:
-
-**Subjective (S):**
-- Patient history, chief complaint, demographics
-- Symptom duration and progression
-
-**Objective (O):**
-- Physical examination findings
-- Lesion characteristics (morphology, distribution, color, texture)
-
-**Assessment (A):**
-- Differential diagnoses ranked by likelihood
-- Primary diagnosis with confidence score (0.0-1.0)
-- Evidence from guidelines supporting each diagnosis
-- Specific citations (e.g., "AAD Guidelines: Psoriasis Management")
-
-**Plan (P):**
-- Recommended diagnostic tests
-- Treatment options per guidelines
-- Follow-up recommendations
-
-Confidence Scoring Guidelines:
-- 0.9-1.0: Pathognomonic features, complete data, strong guideline match
-- 0.7-0.89: Good data quality, solid guideline support
-- 0.5-0.69: Some ambiguity or missing data
-- Below 0.5: Significant uncertainty
-
-Format your response as a structured SOAP note with clear section headers."""
+Critical clinical information is missing. Output the specific clarifying questions identified during triage.
+Be precise — ask only for what is genuinely missing from the case description above."""
 
     try:
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
-            max_tokens=3000,  # Increased for complete SOAP note with extensive differentials
+            max_tokens=500,
             temperature=0.0
         )
         response = _sanitize_response(response)
 
+        # Store in thread-local so run_async() always gets the real MedGemma output
+        # (Gemini's text event after the tool call has attribution issues — store here directly)
+        _run_outputs["last_diagnostic_output"] = response
+
         return {
             "soap_note": response,
-            "specialist_used": "MedGemma-27B",
+            "specialist_used": _specialist_display_name(),
             "reasoning_engine": "MedGemma-27B (Health-Specialized)"
         }
     except Exception as e:
         logger.error(f"MedGemma clinical diagnosis failed: {e}", exc_info=True)
         import traceback
         error_details = traceback.format_exc()
+        error_msg = f"MedGemma clinical diagnosis failed: {e}\n\nUnable to generate diagnosis. Please check the model endpoint and try again."
+        # Store error so run_async() priority chain doesn't fall back to ghost ADK events
+        _run_outputs["last_diagnostic_output"] = error_msg
         return {
-            "soap_note": f"Error calling MedGemma specialist: {e}\n\nDetails:\n{error_details}\n\nFallback: Unable to generate diagnosis.",
-            "specialist_used": "MedGemma-27B (failed)",
+            "soap_note": error_msg,
+            "specialist_used": _specialist_display_name() + " (failed)",
             "reasoning_engine": "Error"
         }
 
@@ -567,35 +711,20 @@ You are a clinical workflow coordinator managing the triage process.
 
 Your role is ORCHESTRATION, not clinical reasoning.
 
-MANDATORY STEPS — YOU MUST COMPLETE ALL 3 IN ORDER:
+MANDATORY STEPS — COMPLETE ALL 3 IN ORDER:
 
-Step 1: CALL analyze_case_completeness tool to check for missing data.
+Step 1: CALL analyze_case_completeness tool.
+  - Pass whatever fields you received (history, physical_exam, etc.).
+  - This tool assembles the full case text for MedGemma.
 
-Step 2: CALL medgemma_triage_analysis tool to get MedGemma specialist assessment.
-  - ALWAYS call this tool, even if Step 1 shows no missing data.
-  - Pass case_summary and missing_items (empty list [] if nothing missing).
+Step 2: CALL medgemma_triage_analysis tool.
+  - Pass case_summary = the FULL ORIGINAL CASE TEXT verbatim (do NOT summarize or shorten it).
+  - Pass missing_items = [] (empty — MedGemma will decide what is missing from the text itself).
 
-Step 3: CALL transfer_to_agent(agent_name='ResearchAgent').
-  - THIS IS MANDATORY. You MUST call this function — do not just write it as text.
-  - Do NOT transfer to DiagnosticAgent — always go to ResearchAgent next.
-  - Writing "Transfer to ResearchAgent" as text is NOT enough. You must EXECUTE the tool call.
-
-CRITICAL: DO NOT STOP after Step 1 or Step 2.
-A short triage response is NEVER the final output.
-You MUST always end by CALLING transfer_to_agent(agent_name='ResearchAgent').
-
-For dermatology cases, critical data includes:
-- Patient history (chief complaint, symptoms)
-- Physical examination OR clinical images
-- Patient demographics (age, gender)
-- Symptom duration
-
-Summary format before transferring:
-- Missing items (if any)
-- MedGemma specialist's clinical assessment
-- Recommendation: Proceed or Request Clarification
-
-YOUR FINAL ACTION: CALL transfer_to_agent(agent_name='ResearchAgent') — no exceptions.
+Step 3: ALWAYS call transfer_to_agent(agent_name='ResearchAgent').
+  - Do this regardless of whether MedGemma found missing data or not.
+  - Writing "Transfer to ResearchAgent" as text is NOT enough — you must EXECUTE the tool call.
+  - The triage result (complete or incomplete) will be passed as context to the next agents.
 """,
         tools=[
             FunctionTool(analyze_case_completeness),
@@ -637,6 +766,16 @@ def create_research_agent(model_name: str = "gemini-pro-latest") -> Agent:
     5. Search strategy guidance (symptoms, morphology, demographics) — without this,
        Gemini generates generic queries that return poor RAG results. The instruction
        focuses queries on clinical features specific to dermatology differential diagnosis.
+
+    6. generate_content_config with FunctionCallingConfigMode.ANY (Feb 2026 fix) —
+       Gemini probabilistically stops the pipeline after RAG returns empty or low-score
+       results, producing no output and never transferring to DiagnosticAgent. This was
+       observed in testing with RAG queries for rare diseases (e.g., annular RC form,
+       pediatric bullous pemphigoid) that have no matching documents in the corpus.
+       Setting mode=ANY forces every Gemini response within this agent to be a function
+       call — so after retrieve_clinical_guidelines returns 0 results, Gemini MUST call
+       medgemma_guideline_synthesis, and after that returns, it MUST call
+       transfer_to_agent(DiagnosticAgent). There is no way for it to stop with free text.
 
     Args:
         model_name: Gemini model for orchestration (default: flash for speed/cost)
@@ -688,7 +827,14 @@ YOUR FINAL ACTION: CALL transfer_to_agent(agent_name='DiagnosticAgent') — no e
             FunctionTool(retrieve_clinical_guidelines),
             FunctionTool(medgemma_guideline_synthesis)
         ],
-        output_schema=None
+        output_schema=None,
+        generate_content_config=types.GenerateContentConfig(
+            tool_config=types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.ANY
+                )
+            )
+        )
     )
 
 
@@ -729,6 +875,14 @@ def create_diagnostic_agent(model_name: str = "gemini-pro-latest") -> Agent:
        "EXACTLY ONCE" instruction is somehow ignored, the step counter terminates
        the run before runaway API costs occur.
 
+    6. No generate_content_config / mode=ANY — DiagnosticAgent has only one tool
+       (medgemma_clinical_diagnosis). Setting mode=ANY would force Gemini to call a
+       tool after every response — but with only one tool available, it loops:
+       call → result → call → result → 100+ times observed in testing.
+       The "EXACTLY ONCE" instruction in the prompt is sufficient to ensure the tool
+       is called. After medgemma_clinical_diagnosis returns, _run_outputs captures the
+       result directly regardless of what Gemini does next.
+
     Args:
         model_name: Gemini model for orchestration (default: flash for speed/cost)
 
@@ -764,11 +918,16 @@ Expected output:
 - Evidence-based citations
 - Treatment recommendations
 
-Simply pass through the MedGemma specialist's output without modification.
-After receiving the tool result, output it as your FINAL response and stop.
+After receiving the tool result, extract the value of the "soap_note" key and output ONLY that plain text.
+Do NOT output JSON. Do NOT output the full dict. Output ONLY the soap_note string value, then stop.
 """,
         tools=[FunctionTool(medgemma_clinical_diagnosis)],
         output_schema=None
+        # NOTE: Do NOT set generate_content_config mode=ANY here.
+        # DiagnosticAgent has only one tool (medgemma_clinical_diagnosis).
+        # mode=ANY would force Gemini to keep calling it in an infinite loop
+        # after the first result is returned — observed 100+ repeated calls in testing.
+        # The "EXACTLY ONCE" instruction in the prompt is sufficient.
     )
 
 
@@ -852,30 +1011,27 @@ Your Sub-Agents:
 2. ResearchAgent - Orchestrates guideline retrieval (MedGemma synthesizes)
 3. DiagnosticAgent - Orchestrates diagnosis (MedGemma generates SOAP note)
 
-MANDATORY WORKFLOW SEQUENCE — ALL 3 STEPS ARE REQUIRED:
+WORKFLOW SEQUENCE — ALWAYS RUN ALL 3 AGENTS IN THIS ORDER:
+
 Step 1: Delegate to TriageAgent.
-Step 2: Delegate to ResearchAgent (MANDATORY — even if triage says "Proceed").
-Step 3: Delegate to DiagnosticAgent for the final SOAP note.
-Step 4: Return the SOAP note to the user. The SOAP note is the ONLY valid final output.
+  - TriageAgent will assess the case and ALWAYS transfer to ResearchAgent.
+
+Step 2: TriageAgent transfers to ResearchAgent automatically.
+  - ResearchAgent retrieves guidelines and ALWAYS transfers to DiagnosticAgent.
+
+Step 3: DiagnosticAgent produces the FINAL output.
+  - If data was complete → DiagnosticAgent outputs a SOAP note.
+  - If data was incomplete → DiagnosticAgent outputs clarifying questions.
+  - Either way, return DiagnosticAgent's output as your final response.
 
 CRITICAL RULES:
-- YOU MUST FOLLOW THIS EXACT SEQUENCE: TriageAgent → ResearchAgent → DiagnosticAgent
-- NEVER SKIP ResearchAgent - guideline retrieval is mandatory for evidence-based diagnosis
-- NEVER let TriageAgent transfer directly to DiagnosticAgent
-- Each agent must complete before moving to next
-- Pass context between agents (triage results → research → diagnostic)
+- NEVER skip any agent. All 3 ALWAYS run: Triage → Research → Diagnostic.
+- NEVER let TriageAgent be the final output. DiagnosticAgent is ALWAYS last.
+- Pass full context between agents (triage results → research → diagnostic).
 
-RECOVERY RULE — READ THIS CAREFULLY:
-If you receive a response that is SHORT (under 1000 characters) AND contains
-no SOAP note sections (no Subjective / Objective / Assessment / Plan) —
-this means ONLY TriageAgent has run. ResearchAgent and DiagnosticAgent have NOT run yet.
-DO NOT return this short response as the final answer.
-IMMEDIATELY delegate to ResearchAgent, passing the triage context.
-Then delegate to DiagnosticAgent.
-Only a response containing a full SOAP note is an acceptable final output.
-
-ERROR TO AVOID: A triage-only response saying "Proceed" or "Transfer to ResearchAgent"
-is NOT the final answer. ResearchAgent MUST still run. DiagnosticAgent MUST still run.
+RECOVERY RULE:
+If DiagnosticAgent's response is missing or very short (under 200 chars), IMMEDIATELY
+delegate to ResearchAgent and then DiagnosticAgent again to recover.
 
 Your role is coordination. The clinical reasoning is done by MedGemma specialist.
 """,
@@ -928,6 +1084,10 @@ class MedGemmaWorkflow:
         # Set up API key in environment for Gemini
         import os
         os.environ["GOOGLE_API_KEY"] = settings.google_api_key
+        # Force Google AI (Gemini API) backend — NOT Vertex AI.
+        # Without this, ADK detects GOOGLE_CLOUD_PROJECT in env and routes to Vertex AI,
+        # which has much lower quotas (and causes 429 RESOURCE_EXHAUSTED on free tier).
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "false"
 
         # Create root coordinator with sub-agents
         self.root_agent = create_root_coordinator(model_name)
@@ -1028,6 +1188,7 @@ class MedGemmaWorkflow:
 
         # Run agent workflow and collect responses + log each agent step
         response_text = ""
+        agent_text_buffers = {}  # agent_name -> accumulated text (keyed by agent)
         agent_steps = []  # Track each agent's response
         current_agent = None
         step_count = 0
@@ -1058,7 +1219,8 @@ class MedGemmaWorkflow:
                         # Handle text parts
                         if hasattr(part, 'text') and part.text:
                             event_text += part.text
-                            response_text += part.text + "\n"
+                            # NOTE: do NOT accumulate into response_text here — we route
+                            # per-agent below so we can return only DiagnosticAgent output
 
                         # Handle function calls (tool usage)
                         if hasattr(part, 'function_call') and part.function_call:
@@ -1124,6 +1286,11 @@ class MedGemmaWorkflow:
                             "function_calls": function_calls
                         })
 
+                        # Route text to per-agent buffer (used to build response_text at the end)
+                        if event_text.strip():
+                            buf_key = agent_name or "Unknown"
+                            agent_text_buffers[buf_key] = agent_text_buffers.get(buf_key, "") + event_text + "\n"
+
                         # Detect if MedGemma specialist was used
                         specialist_model = None
                         step_role = "orchestration"
@@ -1132,7 +1299,7 @@ class MedGemmaWorkflow:
                             fc_name = fc["name"].lower()
                             if "medgemma" in fc_name:
                                 # MedGemma tool was called - clinical reasoning happened
-                                specialist_model = "google/medgemma-27b-it"
+                                specialist_model = _specialist_display_name()
 
                                 # Determine step role based on function
                                 if "triage" in fc_name:
@@ -1312,6 +1479,99 @@ class MedGemmaWorkflow:
         except Exception as e:
             logger.warning(f"Could not retrieve ADK session history: {e}")
 
+        # Build response_text from per-agent buffers.
+        # The SOAP note sometimes lands in RootCoordinator buffer (not DiagnosticAgent)
+        # because after medgemma_clinical_diagnosis returns, the next event's agent attribution
+        # resolves to RootCoordinator. So: scan ALL buffers for SOAP content first.
+        diagnostic_text = agent_text_buffers.get("DiagnosticAgent", "").strip()
+        triage_text = agent_text_buffers.get("TriageAgent", "").strip()
+
+        # Search all buffers for a complete SOAP note (has both Subjective + Assessment)
+        soap_text = None
+        soap_source = None
+        for buf_agent, buf_content in agent_text_buffers.items():
+            buf_lower = buf_content.lower()
+            if "subjective" in buf_lower and "assessment" in buf_lower:
+                soap_text = buf_content.strip()
+                soap_source = buf_agent
+                break
+
+        # Retrieve MedGemma tool outputs stored during pipeline execution.
+        # These are populated by the FunctionTool callbacks (medgemma_triage_analysis,
+        # medgemma_guideline_synthesis, medgemma_clinical_diagnosis) as each runs.
+        # We save them to local variables BEFORE clearing _run_outputs so the recovery
+        # path (below) can restore them if DiagnosticAgent never ran. Previously, the
+        # research context was not saved to a local before clearing, which meant the
+        # recovery call to medgemma_clinical_diagnosis received empty research context
+        # even when medgemma_guideline_synthesis had successfully produced output.
+        medgemma_diagnostic_raw = _run_outputs.get("last_diagnostic_output")
+        medgemma_triage_raw = _run_outputs.get("last_triage_output")
+        medgemma_research_raw = _run_outputs.get("last_research_context")  # saved for recovery
+        _run_outputs["last_diagnostic_output"] = None  # clear after use
+        _run_outputs["last_triage_output"] = None       # clear after use
+        _run_outputs["last_research_context"] = None    # clear after use
+
+        # Did DiagnosticAgent actually call medgemma_clinical_diagnosis?
+        diagnostic_tool_was_called = any(
+            any("medgemma_clinical_diagnosis" in fc["name"] for fc in step.get("function_calls", []))
+            for step in agent_steps
+        )
+
+        # Priority: DiagnosticAgent always runs last and produces the final output
+        # (SOAP for complete cases, questions for incomplete cases)
+        # IMPORTANT: if diagnostic tool ran, NEVER fall back to triage buffer —
+        # triage buffer may contain ghost ADK echo events (Step 9 phantom).
+        if medgemma_diagnostic_raw:
+            response_text = medgemma_diagnostic_raw
+            logger.info(f"response_text source: MedGemma diagnostic tool output ({len(response_text)} chars)")
+        elif soap_text:
+            response_text = soap_text
+            logger.info(f"response_text source: SOAP found in {soap_source} buffer ({len(response_text)} chars)")
+        elif diagnostic_text:
+            response_text = diagnostic_text
+            logger.info(f"response_text source: DiagnosticAgent buffer ({len(response_text)} chars)")
+        elif not diagnostic_tool_was_called:
+            # DiagnosticAgent never ran — pipeline cut short (Gemini stopped after RAG).
+            # If triage said SUFFICIENT, force a direct MedGemma diagnosis call now.
+            triage_said_sufficient = medgemma_triage_raw and "sufficient" in medgemma_triage_raw.lower()
+            if triage_said_sufficient:
+                logger.warning("Pipeline cut short after ResearchAgent — forcing direct diagnosis call")
+                # Restore _run_outputs before the direct call so medgemma_clinical_diagnosis
+                # reads the real triage and research context instead of falling back to
+                # empty parameter values. This mirrors the state _run_outputs would have
+                # been in if DiagnosticAgent had been called normally by Gemini.
+                _run_outputs["last_triage_output"] = medgemma_triage_raw
+                _run_outputs["last_research_context"] = medgemma_research_raw or ""
+                recovery_result = medgemma_clinical_diagnosis(
+                    case_data=user_message or ""
+                )
+                recovery_response = recovery_result.get("soap_note", "")
+                if recovery_response and not recovery_response.startswith("Error"):
+                    response_text = recovery_response
+                    logger.info(f"response_text source: RECOVERY direct diagnosis ({len(response_text)} chars)")
+                    agent_steps.append({
+                        "agent": "DiagnosticAgent",
+                        "response": "[RECOVERY] Direct MedGemma diagnosis (pipeline cut short after RAG)",
+                        "function_calls": [{"name": "medgemma_clinical_diagnosis", "args": "recovery_call"}]
+                    })
+                else:
+                    response_text = medgemma_triage_raw or triage_text or "Pipeline stopped before diagnosis. Please try again."
+                    logger.warning("Recovery diagnosis also failed")
+            else:
+                # Triage said INSUFFICIENT — triage output has the questions
+                response_text = medgemma_triage_raw or triage_text or ""
+                logger.info(f"response_text source: triage output (INSUFFICIENT, diagnostic skipped) ({len(response_text)} chars)")
+        elif diagnostic_tool_was_called:
+            # Diagnostic ran but all sources empty — error
+            response_text = "MedGemma diagnostic call completed but returned empty output. Please check the model endpoint and try again."
+            logger.warning("Diagnostic tool was called but all output sources are empty")
+        else:
+            # Last resort: use the longest non-empty buffer
+            longest = max(agent_text_buffers.values(), key=lambda v: len(v.strip()), default="")
+            response_text = longest.strip()
+            logger.info(f"response_text source: fallback longest buffer ({len(response_text)} chars)")
+            logger.info(f"All buffer keys: {list(agent_text_buffers.keys())}")
+
         # Extract final response
         result = {
             "session_id": session.session_id,
@@ -1319,7 +1579,8 @@ class MedGemmaWorkflow:
             "case_id": case.case_id,
             "response": response_text.strip(),
             "model": self.model_name,
-            "agent_steps_count": len(agent_steps)
+            "agent_steps_count": len(agent_steps),
+            "agent_steps": agent_steps  # full step list for UI display
         }
 
         # Complete and save session
@@ -1394,18 +1655,22 @@ class MedGemmaWorkflow:
 
 def create_workflow(
     model_name: str = "gemini-pro-latest",
-    use_medgemma: bool = True
+    use_medgemma: bool = True,
+    agent_model: str = "medgemma-hf"
 ) -> MedGemmaWorkflow:
     """
     Create a MedGemma workflow instance.
 
     ARCHITECTURE:
-    - model_name: Gemini model for ADK orchestration (flash recommended for cost/speed)
-    - use_medgemma: Whether to use MedGemma-27B for clinical reasoning (always True)
+    - model_name: Gemini model for ADK orchestration
+    - agent_model: MedGemma variant for clinical reasoning
+      Options: "medgemma-hf" (HF API, default), "medgemma-vertex" (Vertex AI),
+               "medgemma" (local 27B GPU), "medgemma-4b" (local 4B GPU)
 
     Args:
-        model_name: Gemini model for workflow orchestration (default: gemini-1.5-flash)
+        model_name: Gemini model for workflow orchestration (default: gemini-pro-latest)
         use_medgemma: Whether to use MedGemma specialist (default: True)
+        agent_model: Which MedGemma variant to use (default: "medgemma-hf")
 
     Returns:
         MedGemmaWorkflow instance with hybrid architecture
@@ -1413,5 +1678,5 @@ def create_workflow(
     return MedGemmaWorkflow(
         model_name=model_name,
         use_medgemma=use_medgemma,
-        agent_model="medgemma"  # Default: use MedGemma for agents
+        agent_model=agent_model
     )

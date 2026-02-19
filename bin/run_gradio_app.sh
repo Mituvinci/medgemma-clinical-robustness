@@ -103,8 +103,8 @@ from config.config import settings
 errors = []
 if not settings.huggingface_api_key:
     errors.append('HUGGINGFACE_API_KEY missing')
-if not settings.gemini_api_key:
-    errors.append('GEMINI_API_KEY missing')
+if not settings.google_api_key:
+    errors.append('GOOGLE_API_KEY missing')
 if errors:
     print('  ❌ Missing:', ', '.join(errors))
     exit(1)

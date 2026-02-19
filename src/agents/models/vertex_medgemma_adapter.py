@@ -82,14 +82,28 @@ class VertexMedGemmaAdapter(BaseLLM):
             Generated text
         """
         try:
-            instance = {"prompt": prompt}
+            # MedGemma-IT models require the Gemma instruction-tuned chat template.
+            # Sending raw text without it causes the model to treat the prompt as a
+            # base-model completion task, producing garbage output.
+            chat_prompt = (
+                f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+            )
+            instance = {"prompt": chat_prompt}
 
             # Handle image input if provided
             image_path = kwargs.get("image_path")
             if image_path:
                 instance["image"] = self._encode_image(image_path)
 
-            response = self.endpoint.predict(instances=[instance])
+            # Pass generation parameters — without these the endpoint uses defaults
+            # (very short output, wrong temperature) causing truncated/garbage responses.
+            parameters = {
+                "max_new_tokens": max_tokens,
+                "temperature": max(temperature, 1e-6),  # Vertex rejects exactly 0.0
+                "do_sample": temperature > 0.01,
+            }
+
+            response = self.endpoint.predict(instances=[instance], parameters=parameters)
 
             # Extract text from predictions
             if response.predictions:
@@ -102,6 +116,49 @@ class VertexMedGemmaAdapter(BaseLLM):
                     text = str(result)
             else:
                 text = ""
+
+            print(f"\n===RAW VERTEX RESPONSE ({len(text)} chars)===\n{repr(text)}\n===END RAW===\n", flush=True)
+
+            # One-click-deploy endpoints echo the full prompt before the response.
+            # Strip everything up to and including the last "Output:" marker.
+            for marker in ["\nOutput:\n", "\nOutput:\r\n", "Output:\n"]:
+                idx = text.rfind(marker)
+                if idx != -1:
+                    text = text[idx + len(marker):].strip()
+                    break
+            # Also strip "Final Output:" prefix if present
+            if text.startswith("Final Output:"):
+                text = text[len("Final Output:"):].strip()
+            if text.startswith("---"):
+                text = text[3:].strip()
+
+            # MedGemma-1.5-4B-IT may wrap reasoning in <thought>...</thought> tags.
+            # Two observed behaviors:
+            #   A) Reasoning in <thought>, answer after </thought>  → keep after-thought text
+            #   B) Full answer inside <thought>, short stub after   → keep thought content
+            # Behavior B happens when the token budget runs out mid-answer: the model
+            # generates the SOAP note inside the thought block, then starts "Okay, here
+            # is a SOAP note..." after </thought> but gets cut off after a few words.
+            # Naively stripping <thought>...</thought> in case B throws away the real answer.
+            # Fix: if after-thought text is < 200 chars, fall back to the thought content.
+            import re as _re
+            thought_match = _re.search(r'<thought>(.*?)</thought>\s*(.*)', text, flags=_re.DOTALL)
+            if thought_match:
+                thought_content = thought_match.group(1).strip()
+                after_thought   = thought_match.group(2).strip()
+                if len(after_thought) >= 200:
+                    # Normal case A: substantial answer follows </thought>
+                    text = after_thought
+                    logger.debug(f"<thought> stripped — using after-thought text ({len(text)} chars)")
+                else:
+                    # Case B: answer was inside <thought>, stub after is too short to use
+                    text = thought_content
+                    logger.debug(f"<thought> content kept — after-thought too short ({len(after_thought)} chars)")
+            elif text.lower().startswith("thought"):
+                # Partial tag — strip the leading "thought" word if no actual answer follows
+                after = _re.sub(r'^thought\S*\s*', '', text, flags=_re.IGNORECASE).strip()
+                if after:
+                    text = after
 
             logger.debug(f"Vertex AI MedGemma generated {len(text)} characters")
             return text

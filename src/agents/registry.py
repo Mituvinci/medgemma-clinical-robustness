@@ -41,6 +41,7 @@ from config.config import settings
 from src.agents.models.medgemma_adapter import MedGemmaAdapter
 from src.agents.models.gemini_adapter import GeminiAdapter
 from src.agents.models.vertex_medgemma_adapter import VertexMedGemmaAdapter
+from src.agents.models.hf_inference_adapter import HFInferenceAdapter
 from src.agents.models.openai_adapter import OpenAIAdapter
 from src.agents.models.claude_adapter import ClaudeAdapter
 
@@ -67,6 +68,44 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "Clinical diagnosis",
             "Medical literature review",
             "Patient case analysis"
+        ]
+    },
+
+    "medgemma-1.5-4b": {
+        "adapter": MedGemmaAdapter,
+        "status": "active",
+        "description": "MedGemma-1.5-4B-IT - Local GPU (download once, load from cache)",
+        "provider": "huggingface",
+        "requires": "HUGGINGFACE_API_KEY",
+        "model_id": "google/medgemma-1.5-4b-it",
+        "strengths": [
+            "Medical knowledge (1.5-4B params)",
+            "Low VRAM (~4-6 GB in 4-bit)",
+            "Fast inference vs 27B"
+        ],
+        "use_cases": [
+            "Gradio demo testing (GPU node)",
+            "Clinical diagnosis",
+            "Lightweight local reasoning"
+        ]
+    },
+
+    "medgemma-hf": {
+        "adapter": HFInferenceAdapter,
+        "status": "active",
+        "description": "MedGemma-1.5-4B-IT via HuggingFace Inference API (no local GPU)",
+        "provider": "huggingface_api",
+        "requires": "HUGGINGFACE_API_KEY",
+        "model_id": "google/medgemma-1.5-4b-it",
+        "strengths": [
+            "Medical knowledge (1.5-4B params)",
+            "No GPU required — serverless HF API",
+            "Fast startup, no model loading"
+        ],
+        "use_cases": [
+            "Gradio demo (lightweight)",
+            "Clinical diagnosis via API",
+            "Development and testing"
         ]
     },
 
@@ -119,7 +158,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "model_id": "medgemma-1.5-4b-it",
         "project_id": settings.google_cloud_project,
         "region": "us-central1",
-        "endpoint_id": "mg-endpoint-d719f530-4efc-4371-a6a4-46fd8ade1d5b",
+        "endpoint_id": "mg-endpoint-d271f800-8120-4ed7-9cc0-73aded2659b7",
         "strengths": [
             "Medical knowledge",
             "Fast inference (4B params)",

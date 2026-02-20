@@ -110,7 +110,7 @@ Deploy MedGemma models via Vertex AI Model Garden (one-click deploy), then updat
 
 ```bash
 # Launch Gradio UI
-bash bin/run_gradio_app.sh
+bash bin/run_gradio_demo.sh
 
 # Run evaluation (test with 1 case)
 python scripts/evaluate_jdcr_cases.py \
@@ -199,4 +199,4 @@ python scripts/evaluate_jdcr_cases.py \
 
 Apache 2.0 License
 
-Last Updated: February 17, 2026
+Last Updated: February 19, 2026

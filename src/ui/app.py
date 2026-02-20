@@ -15,9 +15,19 @@ import logging
 import json
 import asyncio
 import os
+import datetime as _dt
+import html as _html
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from PIL import Image
+
+# Constants
+MAX_TEXT_LENGTH = 5_000        # ~1,250 tokens — covers any clinical case
+MAX_IMAGE_PDF_SIZE_MB = 5      # 5MB for images and PDFs
+MAX_TEXT_FILE_SIZE_KB = 5      # 5KB for .json and .txt files
+MAX_FILES = 3
+TEMP_IMAGE_DIR = "data/temp_images"
+TEMP_IMAGE_MAX_AGE_HOURS = 2   # Clean up temp images older than this
 
 from src.agents.adk_agents import create_workflow
 from src.utils.schemas import ClinicalCase, ContextState
@@ -51,10 +61,8 @@ class MedGemmaApp:
         logger.info(f"MedGemmaApp initialized with agent_model={agent_model}")
         self.current_case = None
         self.current_session = None  # Session object (not just ID)
-        self.conversation_history = []
         self.is_analyzing = False
         self.in_followup_mode = False  # Track if we're waiting for follow-up
-        self.uploaded_files = []
 
         logger.info("MedGemmaApp initialized (HTML Design Match)")
 
@@ -100,19 +108,145 @@ class MedGemmaApp:
 
         return f"session_{counter:03d}"
 
+    @staticmethod
+    def _validate_text(text: str) -> str:
+        """Validate and sanitize text input. Returns cleaned text or raises ValueError."""
+        if not text:
+            return ""
+        if len(text) > MAX_TEXT_LENGTH:
+            raise ValueError(f"Text input too long ({len(text):,} chars). Maximum is {MAX_TEXT_LENGTH:,} characters.")
+        return text.strip()
+
+    @staticmethod
+    def _validate_file(file_path: str) -> str:
+        """Validate uploaded file size by type. Returns empty string if valid, error message if not."""
+        try:
+            name = os.path.basename(file_path)
+            ext = os.path.splitext(name)[1].lower()
+            size_bytes = os.path.getsize(file_path)
+            size_kb = size_bytes / 1024
+            size_mb = size_bytes / (1024 * 1024)
+
+            if ext in ('.json', '.txt'):
+                if size_kb > MAX_TEXT_FILE_SIZE_KB:
+                    return f"File '{name}' is too large ({size_kb:.1f}KB). Text/JSON files must be under {MAX_TEXT_FILE_SIZE_KB}KB."
+            elif ext in ('.jpg', '.jpeg', '.png', '.pdf'):
+                if size_mb > MAX_IMAGE_PDF_SIZE_MB:
+                    return f"File '{name}' is too large ({size_mb:.1f}MB). Image/PDF files must be under {MAX_IMAGE_PDF_SIZE_MB}MB."
+            return ""
+        except OSError:
+            return f"Cannot read file: {os.path.basename(file_path)}"
+
+    # ── Session persistence (follow-up survives browser refresh) ─────────
+
+    ACTIVE_SESSION_FILE = Path("data/active_session.json")
+
+    def _save_active_session(self, response_text: str, reasoning_text: str, citations_text: str):
+        """Persist follow-up state to disk so it survives browser refresh."""
+        try:
+            self.ACTIVE_SESSION_FILE.parent.mkdir(exist_ok=True)
+            # Flush ConversationSession to logs/sessions/ so .load() can find it
+            if self.current_session:
+                self.current_session.save()
+            data = {
+                "version": 1,
+                "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+                "in_followup_mode": True,
+                "session_id": self.current_session.session_id if self.current_session else None,
+                "case_data": self.current_case.dict(exclude={"image_data"}) if self.current_case else None,
+                "last_response_text": response_text,
+                "last_reasoning_text": reasoning_text,
+                "last_citations_text": citations_text,
+            }
+            with open(self.ACTIVE_SESSION_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+            logger.info(f"Saved active session to {self.ACTIVE_SESSION_FILE}")
+        except Exception as e:
+            logger.error(f"Failed to save active session: {e}")
+
+    def _clear_active_session(self):
+        """Remove active session file (case completed or reset)."""
+        try:
+            if self.ACTIVE_SESSION_FILE.exists():
+                self.ACTIVE_SESSION_FILE.unlink()
+                logger.info("Cleared active session file")
+        except OSError as e:
+            logger.debug(f"Could not clear active session file: {e}")
+
+    def _restore_active_session(self):
+        """Restore follow-up state from disk on page load.
+
+        Returns 8-tuple matching yield pattern, or None if nothing to restore.
+        """
+        if not self.ACTIVE_SESSION_FILE.exists():
+            return None
+        try:
+            with open(self.ACTIVE_SESSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("version") != 1 or not data.get("in_followup_mode"):
+                self._clear_active_session()
+                return None
+            if not data.get("session_id") or not data.get("case_data"):
+                self._clear_active_session()
+                return None
+            # Staleness check (> 24 hours)
+            try:
+                saved_time = _dt.datetime.fromisoformat(data["timestamp"].rstrip("Z"))
+                age_hours = (_dt.datetime.utcnow() - saved_time).total_seconds() / 3600
+                if age_hours > 24:
+                    logger.info(f"Active session is {age_hours:.1f}h old, clearing")
+                    self._clear_active_session()
+                    return None
+            except (ValueError, KeyError):
+                pass
+            # Restore ClinicalCase
+            self.current_case = ClinicalCase(**data["case_data"])
+            # Restore ConversationSession from logs/sessions/
+            from src.agents.conversation_manager import ConversationSession, get_conversation_manager
+            self.current_session = ConversationSession.load(data["session_id"])
+            get_conversation_manager().active_sessions[data["session_id"]] = self.current_session
+            self.in_followup_mode = True
+            self.is_analyzing = False
+            logger.info(f"Restored active session: {data['session_id']}")
+            return (
+                data.get("last_response_text", ""),
+                data.get("last_reasoning_text", ""),
+                data.get("last_citations_text", ""),
+                gr.Textbox(value="", interactive=True),
+                gr.Button(visible=False),                     # analyze_btn: hidden
+                gr.Button(visible=True, interactive=True),    # followup_btn: SHOW
+                gr.Button(visible=True),                      # reset_btn
+                gr.Button(interactive=True),                  # camera_btn
+                gr.Button(interactive=True),                  # attach_btn
+            )
+        except Exception as e:
+            logger.error(f"Failed to restore active session: {e}")
+            self._clear_active_session()
+            return None
+
+    # ── End session persistence ──────────────────────────────────────────
+
     def build_case_from_inputs(self, text_input: str, file_list: List[str] = None, session_id: str = None) -> Dict[str, Any]:
-        """Build case dictionary from text input and uploaded files."""
+        """Build case dictionary from text input and uploaded files.
+        Raises ValueError with user-friendly message if any file exceeds size limits.
+        """
         case_data = {
             "case_id": f"ui_{session_id or 'unknown'}",
             "context_state": "original",
         }
 
         if text_input:
-            case_data["history"] = text_input
+            case_data["history"] = self._validate_text(text_input)
 
-        # Process uploaded files
+        # Validate ALL files first — raise on first error so user sees the message
         files = file_list or []
-        for file_path in files:
+        for file_path in files[:MAX_FILES]:
+            error = self._validate_file(file_path)
+            if error:
+                raise ValueError(error)
+
+        # Process uploaded files (all validated)
+        for file_path in files[:MAX_FILES]:
             file_ext = file_path.lower() if isinstance(file_path, str) else file_path.name.lower()
 
             if any(file_ext.endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
@@ -127,6 +261,26 @@ class MedGemmaApp:
 
     def process_case(self, text_input: str, file_list: List[str] = None):
         """Process case submission. Generator for streaming updates."""
+        # Guard: require at least some input before calling any agent
+        has_text = bool(text_input and text_input.strip())
+        has_files = bool(file_list and len(file_list) > 0)
+        if not has_text and not has_files:
+            yield (
+                "**Please provide clinical information before submitting.**\n\n"
+                "You can:\n"
+                "- Type a clinical case description in the text field\n"
+                "- Attach a case file (.txt, .json, .pdf)\n"
+                "- Attach a clinical image (.jpg, .png)",
+                "", "",
+                gr.Textbox(interactive=True),
+                gr.Button(visible=True, interactive=True),   # analyze_btn
+                gr.Button(visible=False),                     # followup_btn
+                gr.Button(visible=False),                     # reset_btn
+                gr.Button(interactive=True),                  # camera_btn
+                gr.Button(interactive=True),                  # attach_btn
+            )
+            return
+
         self.is_analyzing = True
 
         # Generate session_id once, use for both case_id and workflow
@@ -140,11 +294,12 @@ class MedGemmaApp:
             "Processing your case...",  # soap_output
             "",  # reasoning_output
             "",  # citations_output
-            gr.update(interactive=False),  # text_input: keep text, just lock it
-            gr.update(value="Analyzing...", interactive=False),  # analyze_btn
-            gr.update(visible=False),  # reset_btn
-            gr.update(interactive=False),  # camera_btn
-            gr.update(interactive=False),  # attach_btn
+            gr.Textbox(interactive=False),  # text_input: keep text, just lock it
+            gr.Button(visible=False, interactive=False),  # analyze_btn: hide during processing
+            gr.Button(visible=False),                      # followup_btn: hidden
+            gr.Button(visible=False),                      # reset_btn
+            gr.Button(interactive=False),                  # camera_btn
+            gr.Button(interactive=False),                  # attach_btn
         )
 
         try:
@@ -180,31 +335,38 @@ class MedGemmaApp:
                 self.in_followup_mode = True
                 self.is_analyzing = False
 
+                formatted_pause = self._format_clarification_request(pause_msg)
+                self._save_active_session(formatted_pause, reasoning, citations)
+
+                logger.info("Yielding PAUSE state — showing 'Submit Follow-up' button")
                 yield (
-                    self._format_clarification_request(pause_msg),
+                    formatted_pause,
                     reasoning,
                     citations,
-                    gr.update(value="", interactive=True),
-                    gr.update(value="Submit Follow-up", interactive=True),
-                    gr.update(visible=True),
-                    gr.update(interactive=True),  # camera_btn
-                    gr.update(interactive=True),  # attach_btn
+                    gr.Textbox(value="", interactive=True),
+                    gr.Button(visible=False),                     # analyze_btn: HIDE
+                    gr.Button(visible=True, interactive=True),    # followup_btn: SHOW
+                    gr.Button(visible=True),                      # reset_btn
+                    gr.Button(interactive=True),                  # camera_btn
+                    gr.Button(interactive=True),                  # attach_btn
                 )
             else:
                 # Completed
                 self.is_analyzing = False
                 self.in_followup_mode = False
                 self.current_session = None
+                self._clear_active_session()
 
                 yield (
                     self._format_soap_response(soap_note),
                     reasoning,
                     citations,
-                    gr.update(value="", interactive=True),
-                    gr.update(value="Analyze Case", interactive=True),
-                    gr.update(visible=False),
-                    gr.update(interactive=True),  # camera_btn
-                    gr.update(interactive=True),  # attach_btn
+                    gr.Textbox(value="", interactive=True),
+                    gr.Button(visible=True, interactive=True),    # analyze_btn: SHOW
+                    gr.Button(visible=False),                     # followup_btn: HIDE
+                    gr.Button(visible=False),                     # reset_btn
+                    gr.Button(interactive=True),                  # camera_btn
+                    gr.Button(interactive=True),                  # attach_btn
                 )
 
         except Exception as e:
@@ -212,22 +374,25 @@ class MedGemmaApp:
             self.is_analyzing = False
             self.in_followup_mode = False
             self.current_session = None
+            self._clear_active_session()
 
             yield (
                 f"Error: {str(e)}",
                 "",
                 "",
-                gr.update(value="", interactive=True),
-                gr.update(value="Analyze Case", interactive=True),
-                gr.update(visible=False),
-                gr.update(interactive=True),  # camera_btn
-                gr.update(interactive=True),  # attach_btn
+                gr.Textbox(value="", interactive=True),
+                gr.Button(visible=True, interactive=True),    # analyze_btn
+                gr.Button(visible=False),                     # followup_btn
+                gr.Button(visible=False),                     # reset_btn
+                gr.Button(interactive=True),                  # camera_btn
+                gr.Button(interactive=True),                  # attach_btn
             )
 
-    def process_followup(self, user_response: str):
+    def process_followup(self, user_response: str, file_list: List[str] = None):
         """
         Process follow-up response after agentic pause.
-        Continues existing session instead of creating new one.
+        Continues existing session (same case session) instead of creating new one.
+        Also processes any newly attached files (text/image) and includes their content.
         """
         if not self.in_followup_mode or not self.current_session:
             logger.error("process_followup called but not in follow-up mode")
@@ -235,9 +400,12 @@ class MedGemmaApp:
                 "Error: Not in follow-up mode. Please start a new case.",
                 "",
                 "",
-                "",
-                gr.update(value="Analyze Case", interactive=True),
-                gr.update(visible=False),
+                gr.Textbox(interactive=True),
+                gr.Button(visible=True, interactive=True),    # analyze_btn
+                gr.Button(visible=False),                     # followup_btn
+                gr.Button(visible=False),                     # reset_btn
+                gr.Button(interactive=True),                  # camera_btn
+                gr.Button(interactive=True),                  # attach_btn
             )
             return
 
@@ -248,21 +416,41 @@ class MedGemmaApp:
             "Processing your follow-up response...",
             "",
             "",
-            gr.update(interactive=False),  # lock textbox, keep text visible
-            gr.update(value="Analyzing...", interactive=False),
-            gr.update(visible=False),
-            gr.update(interactive=False),  # camera_btn
-            gr.update(interactive=False),  # attach_btn
+            gr.Textbox(interactive=False),  # lock textbox, keep text visible
+            gr.Button(visible=False),                         # analyze_btn: hidden
+            gr.Button(visible=False, interactive=False),      # followup_btn: hidden during processing
+            gr.Button(visible=False),                         # reset_btn
+            gr.Button(interactive=False),                     # camera_btn
+            gr.Button(interactive=False),                     # attach_btn
         )
 
         try:
             logger.info(f"Continuing session {self.current_session.session_id} with follow-up")
 
+            # Build follow-up message from text input + any attached files
+            parts = []
+            if user_response and user_response.strip():
+                parts.append(user_response.strip())
+
+            for fp in (file_list or []):
+                file_ext = fp.lower() if isinstance(fp, str) else ""
+                if any(file_ext.endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
+                    # Update image on current case so workflow can use it
+                    self.current_case.image_path = fp
+                    self.current_case.image_data = Image.open(fp)
+                    parts.append("[New clinical image attached]")
+                elif any(file_ext.endswith(ext) for ext in ['.json', '.txt', '.pdf']):
+                    file_data = self.parse_case_file(fp)
+                    if file_data and 'history' in file_data:
+                        parts.append(file_data['history'])
+
+            combined_message = "\n\n".join(parts) if parts else user_response or ""
+
             # Continue existing session with user's response
             result = asyncio.run(
                 self.workflow.run_async(
                     self.current_case,
-                    user_message=f"Additional information from user: {user_response}",
+                    user_message=f"Additional information from user: {combined_message}",
                     existing_session=self.current_session
                 )
             )
@@ -279,37 +467,48 @@ class MedGemmaApp:
                 logger.info("Agent still requesting more information")
                 self.is_analyzing = False
 
+                formatted_followup = self._format_clarification_request(response_text)
+                self._save_active_session(formatted_followup, reasoning, citations)
+
                 yield (
-                    self._format_clarification_request(response_text),
+                    formatted_followup,
                     reasoning,
                     citations,
-                    gr.update(value=None, interactive=True),
-                    gr.update(value="Submit Follow-up", interactive=True),
-                    gr.update(visible=True),
-                    gr.update(interactive=True),  # camera_btn
-                    gr.update(interactive=True),  # attach_btn
+                    gr.Textbox(value="", interactive=True),
+                    gr.Button(visible=False),                     # analyze_btn: hidden
+                    gr.Button(visible=True, interactive=True),    # followup_btn: SHOW
+                    gr.Button(visible=True),                      # reset_btn
+                    gr.Button(interactive=True),                  # camera_btn
+                    gr.Button(interactive=True),                  # attach_btn
                 )
             else:
                 # Completed! Save the session now
                 logger.info(f"Follow-up complete. Saving session {self.current_session.session_id}")
 
-                result["_session"].set_final_output(result)
+                # Remove non-serializable _session before saving to JSON
                 from src.agents.conversation_manager import get_conversation_manager
+                session_obj = result.pop("_session", None)
+                if session_obj:
+                    session_obj.set_final_output(result)
+                    session_obj.save(get_conversation_manager().storage_dir)
+                # complete_session removes from active_sessions; safe if already removed
                 get_conversation_manager().complete_session(self.current_session.session_id, save=True)
 
                 self.is_analyzing = False
                 self.in_followup_mode = False
                 self.current_session = None
+                self._clear_active_session()
 
                 yield (
                     self._format_soap_response(soap_note),
                     reasoning,
                     citations,
-                    gr.update(value=None, interactive=True),
-                    gr.update(value="Analyze Case", interactive=True),
-                    gr.update(visible=False),
-                    gr.update(interactive=True),  # camera_btn
-                    gr.update(interactive=True),  # attach_btn
+                    gr.Textbox(value="", interactive=True),
+                    gr.Button(visible=True, interactive=True),    # analyze_btn: SHOW
+                    gr.Button(visible=False),                     # followup_btn: hidden
+                    gr.Button(visible=False),                     # reset_btn
+                    gr.Button(interactive=True),                  # camera_btn
+                    gr.Button(interactive=True),                  # attach_btn
                 )
 
         except Exception as e:
@@ -317,16 +516,18 @@ class MedGemmaApp:
             self.is_analyzing = False
             self.in_followup_mode = False
             self.current_session = None
+            self._clear_active_session()
 
             yield (
                 f"Error processing follow-up: {str(e)}",
                 "",
                 "",
-                gr.update(value=None, interactive=True),
-                gr.update(value="Analyze Case", interactive=True),
-                gr.update(visible=False),
-                gr.update(interactive=True),  # camera_btn
-                gr.update(interactive=True),  # attach_btn
+                gr.Textbox(value="", interactive=True),
+                gr.Button(visible=True, interactive=True),    # analyze_btn
+                gr.Button(visible=False),                     # followup_btn
+                gr.Button(visible=False),                     # reset_btn
+                gr.Button(interactive=True),                  # camera_btn
+                gr.Button(interactive=True),                  # attach_btn
             )
 
     def _detect_missing_data(self, response: str) -> bool:
@@ -389,34 +590,20 @@ class MedGemmaApp:
                 pass
         clean_response = self._strip_orchestration_text(response)
 
+        # MedGemma often returns questions on one line: "LACK INFORMATION:1.What...2.What..."
+        # Insert line breaks before numbered items so they display as a list
+        import re as _re
+        clean_response = _re.sub(r'(\d+)\.\s*', r'\n\n\1. ', clean_response)
+        # Strip "LACK INFORMATION:" prefix — already shown in the heading
+        clean_response = _re.sub(r'^.*?LACK\s+INFORMATION\s*:\s*', '', clean_response, flags=_re.IGNORECASE).strip()
+
         formatted = "## Please Provide Additional Details\n\n"
         formatted += "To give you an accurate assessment, the specialist needs a bit more information:\n\n"
         formatted += "---\n\n"
         formatted += clean_response
         formatted += "\n\n---\n\n"
-        formatted += "_Please type your answers in the box above and click **Submit Follow-up**._\n"
+        formatted += "_Please type your answers in the **Clinical Case Input** field below and click **Submit Follow-up**._\n"
         return formatted
-
-    def _format_agentic_pause(self, missing_items: List[str], questions: List[str]) -> str:
-        """Format agentic pause message (legacy - keeping for compatibility)."""
-        msg = "## Agentic Pause: Missing Information\n\n"
-        msg += "The agent has paused to request critical clinical context before diagnosing.\n\n"
-
-        if missing_items:
-            msg += "### Missing Information\n\n"
-            for item in missing_items[:3]:
-                msg += f"- {item}\n"
-            msg += "\n"
-
-        if questions:
-            msg += "### Required Clarifications\n\n"
-            for q in questions[:5]:
-                msg += f"**Q:** {q}\n\n"
-
-        msg += "---\n\n"
-        msg += "**Next Step:** Please provide the missing information using the text box below.\n\n"
-
-        return msg
 
     def _strip_orchestration_text(self, text: str) -> str:
         """Remove internal ADK orchestration lines that Gemini echoes back from its system prompt."""
@@ -438,69 +625,117 @@ class MedGemmaApp:
         result = '\n'.join(clean_lines).strip()
         return re.sub(r'\n{3,}', '\n\n', result)
 
-    def _format_soap_response(self, response: str) -> str:
-        """Format SOAP note with Markdown styling, stripping orchestration noise and MedGemma preambles."""
-        import re
+    # ── SOAP formatting: v2 (section-extraction) is active, v1 (regex-strip) commented below ──
 
+    def _format_soap_response(self, response: str) -> str:
+        """v2: Extract SOAP sections directly instead of stripping noise patterns."""
+        import re
         import json as _json
 
-        # If Gemini dumped the raw tool-result JSON, extract the SOAP note from it
+        # Step 1: Unwrap ADK JSON wrapper if present
         stripped = response.strip()
         if stripped.startswith('{'):
             try:
                 data = _json.loads(stripped)
-                # ADK wraps as {"medgemma_clinical_diagnosis_response": {...}}
                 for val in data.values():
                     if isinstance(val, dict):
-                        # Prefer differential_diagnoses (actual output), fall back to soap_note
                         soap = val.get("differential_diagnoses") or val.get("soap_note", "")
                         if soap:
                             response = soap
                         break
             except Exception:
-                pass  # not valid JSON, proceed with original
+                pass
 
-        formatted = self._strip_orchestration_text(response)
+        text = self._strip_orchestration_text(response)
 
-        # Strip prompt echo markers that Vertex AI one-click-deploy adds
+        # Step 2: Try to extract SOAP sections by header
+        soap_headers = [
+            (r'(?:#+\s*)?(?:\*\*)?Subjective\s*(?:\(S\))?(?:\*\*)?[:\s]*', '## Subjective (S)\n\n'),
+            (r'(?:#+\s*)?(?:\*\*)?Objective\s*(?:\(O\))?(?:\*\*)?[:\s]*',  '## Objective (O)\n\n'),
+            (r'(?:#+\s*)?(?:\*\*)?Assessment\s*(?:\(A\))?(?:\*\*)?[:\s]*', '## Assessment (A)\n\n'),
+            (r'(?:#+\s*)?(?:\*\*)?Plan\s*(?:\(P\))?(?:\*\*)?[:\s]*',      '## Plan (P)\n\n'),
+        ]
+
+        # Find positions of each SOAP header
+        sections = []
+        for pattern, header in soap_headers:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                sections.append((m.start(), m.end(), header))
+
+        if len(sections) >= 3:
+            # We found enough SOAP sections — extract content between headers
+            sections.sort(key=lambda x: x[0])
+            formatted_parts = []
+            for i, (start, end, header) in enumerate(sections):
+                next_start = sections[i + 1][0] if i + 1 < len(sections) else len(text)
+                content = text[end:next_start].strip()
+                # Strip stray bold markers MedGemma leaves at content boundaries
+                content = re.sub(r'^\*\*\s*', '', content)
+                content = re.sub(r'\s*\*\*\s*$', '', content)
+                formatted_parts.append(header + content)
+            return '\n\n'.join(formatted_parts)
+
+        # Step 3: Fallback — strip known noise patterns (same as v1 logic)
+        formatted = text
         for marker in ["Final Output:\n", "Final Output:\r\n"]:
             if formatted.startswith(marker):
                 formatted = formatted[len(marker):].strip()
-
-        # Strip Gemini's wrapper phrase: "Here is the complete SOAP note from MedGemma specialist:"
-        formatted = re.sub(
-            r'(?i)here\s+is\s+the\s+complete\s+soap\s+note\s+from\s+\w+.*?:\s*', '', formatted
-        )
-
-        # Strip MedGemma small-model preambles:
+        formatted = re.sub(r'(?i)here\s+is\s+the\s+complete\s+soap\s+note\s+from\s+\w+.*?:\s*', '', formatted)
         formatted = re.sub(r'(?i)ensure\s+all\s+required\s+elements.*?\n', '', formatted)
-        formatted = re.sub(
-            r'(?i)\*?\*?Constraint Checklist.*?(?=\n---|\Z)',
-            '', formatted, flags=re.DOTALL
-        )
+        formatted = re.sub(r'(?i)\*?\*?Constraint Checklist.*?(?=\n---|\Z)', '', formatted, flags=re.DOTALL)
         formatted = re.sub(r'(?i)strategizing\s+complete\..*?\n', '', formatted)
-
-        # Strip header metadata block with placeholder values
-        # e.g. **Patient Name:** [Patient Name] / **Date of Visit:** [Date] / **MRN:** [MRN]
         formatted = re.sub(r'(?m)^\*\*Patient Name:\*\*.*$', '', formatted)
         formatted = re.sub(r'(?m)^\*\*Date of Visit:\*\*.*$', '', formatted)
         formatted = re.sub(r'(?m)^\*\*Referring Physician.*:\*\*.*$', '', formatted)
         formatted = re.sub(r'(?m)^\*\*Medical Record Number.*:\*\*.*$', '', formatted)
-        # Also strip any line that is just a [placeholder] bracket value
         formatted = re.sub(r'(?m)^\*\*[\w\s]+:\*\*\s*\[[\w\s]+\]\s*$', '', formatted)
-
-        # Remove leading "---" separators and collapse blank lines
         formatted = re.sub(r'^\s*---\s*\n', '', formatted, flags=re.MULTILINE)
         formatted = re.sub(r'\n{3,}', '\n\n', formatted).strip()
-
-        # Bold SOAP section headers if plain text
         if "Subjective" in formatted and "**Subjective" not in formatted:
             formatted = formatted.replace("Subjective (S):", "## Subjective (S)")
             formatted = formatted.replace("Objective (O):", "## Objective (O)")
             formatted = formatted.replace("Assessment (A):", "## Assessment (A)")
             formatted = formatted.replace("Plan (P):", "## Plan (P)")
-
         return formatted
+
+    # def _format_soap_response_v1(self, response: str) -> str:
+    #     """v1 (original): Format SOAP note by stripping noise with regex patterns."""
+    #     import re
+    #     import json as _json
+    #     stripped = response.strip()
+    #     if stripped.startswith('{'):
+    #         try:
+    #             data = _json.loads(stripped)
+    #             for val in data.values():
+    #                 if isinstance(val, dict):
+    #                     soap = val.get("differential_diagnoses") or val.get("soap_note", "")
+    #                     if soap:
+    #                         response = soap
+    #                     break
+    #         except Exception:
+    #             pass
+    #     formatted = self._strip_orchestration_text(response)
+    #     for marker in ["Final Output:\n", "Final Output:\r\n"]:
+    #         if formatted.startswith(marker):
+    #             formatted = formatted[len(marker):].strip()
+    #     formatted = re.sub(r'(?i)here\s+is\s+the\s+complete\s+soap\s+note\s+from\s+\w+.*?:\s*', '', formatted)
+    #     formatted = re.sub(r'(?i)ensure\s+all\s+required\s+elements.*?\n', '', formatted)
+    #     formatted = re.sub(r'(?i)\*?\*?Constraint Checklist.*?(?=\n---|\Z)', '', formatted, flags=re.DOTALL)
+    #     formatted = re.sub(r'(?i)strategizing\s+complete\..*?\n', '', formatted)
+    #     formatted = re.sub(r'(?m)^\*\*Patient Name:\*\*.*$', '', formatted)
+    #     formatted = re.sub(r'(?m)^\*\*Date of Visit:\*\*.*$', '', formatted)
+    #     formatted = re.sub(r'(?m)^\*\*Referring Physician.*:\*\*.*$', '', formatted)
+    #     formatted = re.sub(r'(?m)^\*\*Medical Record Number.*:\*\*.*$', '', formatted)
+    #     formatted = re.sub(r'(?m)^\*\*[\w\s]+:\*\*\s*\[[\w\s]+\]\s*$', '', formatted)
+    #     formatted = re.sub(r'^\s*---\s*\n', '', formatted, flags=re.MULTILINE)
+    #     formatted = re.sub(r'\n{3,}', '\n\n', formatted).strip()
+    #     if "Subjective" in formatted and "**Subjective" not in formatted:
+    #         formatted = formatted.replace("Subjective (S):", "## Subjective (S)")
+    #         formatted = formatted.replace("Objective (O):", "## Objective (O)")
+    #         formatted = formatted.replace("Assessment (A):", "## Assessment (A)")
+    #         formatted = formatted.replace("Plan (P):", "## Plan (P)")
+    #     return formatted
 
     def _extract_thinking_process(self, response: str, result: dict = None) -> str:
         """Build a readable, scrollable agent trace from actual agent_steps in the result."""
@@ -567,9 +802,12 @@ class MedGemmaApp:
         trace += f"_{len(agent_steps)} agent interactions logged_"
         return trace
 
+    # ── Citation extraction: v2 (ast.literal_eval fallback) active, v1 (regex fallback) commented below ──
+
     def _extract_citations(self, response: str, is_pause: bool = False, result: dict = None) -> str:
-        """Extract RAG citations from agent_steps (RAG tool args) and from MedGemma response text."""
+        """v2: Extract RAG citations — uses structured data first, ast.literal_eval fallback instead of regex."""
         import re
+        import ast
         result = result or {}
         agent_steps = result.get("agent_steps", [])
 
@@ -584,8 +822,7 @@ class MedGemmaApp:
             citations_md += "- JAAD Case Reports\n"
             return citations_md
 
-        # Primary source: guidelines stored directly by retrieve_clinical_guidelines tool
-        # (bypasses fragile function-call arg string parsing)
+        # Primary source: structured data stored directly by the tool
         rag_docs = []
         stored_guidelines = result.get("retrieved_guidelines", [])
         rag_query = result.get("rag_query", "")
@@ -599,31 +836,43 @@ class MedGemmaApp:
             score = g.get("similarity_score", 0.0)
             rag_docs.append((src, title, score))
 
-        # Fallback: if stored_guidelines is empty, parse from function call args
+        # Fallback: parse function call args via ast.literal_eval (not regex)
         if not stored_guidelines:
             for step in agent_steps:
                 for fc in step.get("function_calls", []):
-                    if fc.get("name") == "retrieve_clinical_guidelines" and not rag_query:
-                        args = fc.get("args", "")
-                        m = re.search(r"'query':\s*'([^']+)'", args)
-                        if m:
-                            rag_docs.insert(0, ("Query used", m.group(1)))
-                    elif fc.get("name") == "medgemma_guideline_synthesis":
-                        args = fc.get("args", "")
-                        titles = re.findall(r"'title':\s*'([^']+)'", args)
-                        sources = re.findall(r"'source':\s*'([^']+)'", args)
-                        scores = re.findall(r"'similarity_score':\s*([\d.]+)", args)
-                        for i, title in enumerate(titles):
-                            src_item = sources[i] if i < len(sources) else "AAD"
-                            score_item = float(scores[i]) if i < len(scores) else 0.0
-                            rag_docs.append((src_item, title, score_item))
+                    args_str = fc.get("args", "")
+                    if not args_str:
+                        continue
+                    try:
+                        args_dict = ast.literal_eval(args_str) if isinstance(args_str, str) else args_str
+                    except (ValueError, SyntaxError):
+                        args_dict = {}
+                    if not isinstance(args_dict, dict):
+                        continue
 
-        # Also search response text for inline citations
+                    if fc.get("name") == "retrieve_clinical_guidelines" and not rag_query:
+                        query = args_dict.get("query", "")
+                        if query:
+                            rag_docs.insert(0, ("Query used", query))
+
+                    elif fc.get("name") == "medgemma_guideline_synthesis":
+                        guidelines = args_dict.get("guidelines", [])
+                        if isinstance(guidelines, list):
+                            for g in guidelines:
+                                if isinstance(g, dict):
+                                    rag_docs.append((
+                                        g.get("source", "AAD"),
+                                        g.get("title", "Untitled"),
+                                        float(g.get("similarity_score", 0.0)),
+                                    ))
+
+        # Also search response text for inline citations (simple, stable patterns)
         inline_sources = re.findall(r'Source:\s*([^\n\r]+)', response, re.IGNORECASE)
         aad_inline = re.findall(r'(?:AAD Guidelines?|American Academy of Dermatology)[:\-]\s*([^\n\r\.]+)', response, re.IGNORECASE)
         sp_inline = re.findall(r'StatPearls[:\-]\s*([^\n\r\.]+)', response, re.IGNORECASE)
         inline_all = list(dict.fromkeys([s.strip() for s in inline_sources + aad_inline + sp_inline if s.strip()]))
 
+        # Format output
         if rag_docs:
             citations_md += "*Documents retrieved from RAG corpus (Vertex AI RAG):*\n\n"
             seen_titles = set()
@@ -634,14 +883,12 @@ class MedGemmaApp:
                     citations_md += "**Retrieved documents:**\n\n"
                 elif len(item) == 3:
                     src, title, score = item
-                    # Strip PDF extension for readability
-                    clean_title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE).replace('_', ' ').replace('-', ' ')
+                    clean_title = re.sub(r'\.pdf$', '', str(title), flags=re.IGNORECASE).replace('_', ' ').replace('-', ' ')
                     if clean_title not in seen_titles and clean_title.strip() and clean_title.lower() not in ("untitled", "unknown"):
                         seen_titles.add(clean_title)
                         citations_md += f"- **{src}** — {clean_title} *(similarity: {score:.2f})*\n"
                         has_docs = True
                     elif clean_title not in seen_titles:
-                        # Show even Unknown/Untitled with source info if it has a score
                         seen_titles.add(clean_title)
                         citations_md += f"- **{src}** — *(similarity: {score:.2f})*\n"
                         has_docs = True
@@ -666,6 +913,79 @@ class MedGemmaApp:
         citations_md += "\n---\n\n"
         citations_md += "*RAG corpus: AAD guidelines, StatPearls, JAAD Case Reports (Vertex AI RAG, us-west1)*"
         return citations_md
+
+    # def _extract_citations_v1(self, response: str, is_pause: bool = False, result: dict = None) -> str:
+    #     """v1 (original): Extract RAG citations with regex fallback for function call args."""
+    #     import re
+    #     result = result or {}
+    #     agent_steps = result.get("agent_steps", [])
+    #     citations_md = "### Evidence-Based Clinical Guidelines\n\n"
+    #     if is_pause:
+    #         citations_md += "*No guidelines retrieved — pipeline paused at Triage stage.*\n\n"
+    #         citations_md += "RAG retrieval only runs when clinical data is sufficient for diagnosis.\n\n"
+    #         citations_md += "Provide the requested information and the Research Agent will query:\n"
+    #         citations_md += "- AAD Clinical Practice Guidelines\n- StatPearls Medical Reference\n- JAAD Case Reports\n"
+    #         return citations_md
+    #     rag_docs = []
+    #     stored_guidelines = result.get("retrieved_guidelines", [])
+    #     rag_query = result.get("rag_query", "")
+    #     if rag_query:
+    #         rag_docs.append(("Query used", rag_query))
+    #     for g in stored_guidelines:
+    #         rag_docs.append((g.get("source", "Unknown"), g.get("title", "Untitled"), g.get("similarity_score", 0.0)))
+    #     if not stored_guidelines:
+    #         for step in agent_steps:
+    #             for fc in step.get("function_calls", []):
+    #                 if fc.get("name") == "retrieve_clinical_guidelines" and not rag_query:
+    #                     args = fc.get("args", "")
+    #                     m = re.search(r"'query':\s*'([^']+)'", args)
+    #                     if m:
+    #                         rag_docs.insert(0, ("Query used", m.group(1)))
+    #                 elif fc.get("name") == "medgemma_guideline_synthesis":
+    #                     args = fc.get("args", "")
+    #                     titles = re.findall(r"'title':\s*'([^']+)'", args)
+    #                     sources = re.findall(r"'source':\s*'([^']+)'", args)
+    #                     scores = re.findall(r"'similarity_score':\s*([\d.]+)", args)
+    #                     for i, title in enumerate(titles):
+    #                         src_item = sources[i] if i < len(sources) else "AAD"
+    #                         score_item = float(scores[i]) if i < len(scores) else 0.0
+    #                         rag_docs.append((src_item, title, score_item))
+    #     inline_sources = re.findall(r'Source:\s*([^\n\r]+)', response, re.IGNORECASE)
+    #     aad_inline = re.findall(r'(?:AAD Guidelines?|American Academy of Dermatology)[:\-]\s*([^\n\r\.]+)', response, re.IGNORECASE)
+    #     sp_inline = re.findall(r'StatPearls[:\-]\s*([^\n\r\.]+)', response, re.IGNORECASE)
+    #     inline_all = list(dict.fromkeys([s.strip() for s in inline_sources + aad_inline + sp_inline if s.strip()]))
+    #     if rag_docs:
+    #         citations_md += "*Documents retrieved from RAG corpus (Vertex AI RAG):*\n\n"
+    #         seen_titles = set()
+    #         has_docs = False
+    #         for item in rag_docs:
+    #             if item[0] == "Query used":
+    #                 citations_md += f"**Search query**: `{item[1]}`\n\n**Retrieved documents:**\n\n"
+    #             elif len(item) == 3:
+    #                 src, title, score = item
+    #                 clean_title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE).replace('_', ' ').replace('-', ' ')
+    #                 if clean_title not in seen_titles and clean_title.strip() and clean_title.lower() not in ("untitled", "unknown"):
+    #                     seen_titles.add(clean_title)
+    #                     citations_md += f"- **{src}** — {clean_title} *(similarity: {score:.2f})*\n"
+    #                     has_docs = True
+    #                 elif clean_title not in seen_titles:
+    #                     seen_titles.add(clean_title)
+    #                     citations_md += f"- **{src}** — *(similarity: {score:.2f})*\n"
+    #                     has_docs = True
+    #         if not has_docs:
+    #             citations_md += "*No matching guideline documents retrieved for this query.*\n"
+    #             citations_md += "*MedGemma still generated the SOAP note — diagnosis is based on the clinical case data.*\n"
+    #         citations_md += "\n"
+    #     if inline_all:
+    #         citations_md += "*Cited by MedGemma in response:*\n\n"
+    #         for src in inline_all:
+    #             citations_md += f"- {src}\n"
+    #         citations_md += "\n"
+    #     if not rag_docs and not inline_all:
+    #         citations_md += "*No citations extracted.*\n\n**Knowledge bases available:**\n"
+    #         citations_md += "- AAD Clinical Practice Guidelines\n- StatPearls Medical Reference\n- JAAD Case Reports\n"
+    #     citations_md += "\n---\n\n*RAG corpus: AAD guidelines, StatPearls, JAAD Case Reports (Vertex AI RAG, us-west1)*"
+    #     return citations_md
 
     def create_ui(self) -> gr.Blocks:
         """Create Gradio interface matching EXACT HTML design."""
@@ -730,6 +1050,9 @@ body {
     overflow: hidden !important;
     opacity: 0 !important;
 }
+
+/* ===== HIDDEN SLOT TEXTBOX (for file removal) ===== */
+#remove-slot { display: none !important; }
 
 /* ===== ACCORDIONS ===== */
 #acc-reasoning button,
@@ -1043,16 +1366,15 @@ hr {
                 # Row showing attached filenames/thumbnails with X buttons
                 file_display = gr.HTML(value="", elem_id="file-display")
 
-                # Hidden remove buttons (one per slot, max 3 files)
-                with gr.Row(visible=False):
-                    remove_btn_0 = gr.Button("x0", elem_id="remove-btn-0", size="sm")
-                    remove_btn_1 = gr.Button("x1", elem_id="remove-btn-1", size="sm")
-                    remove_btn_2 = gr.Button("x2", elem_id="remove-btn-2", size="sm")
+                # Hidden textbox — JS writes the slot index here to trigger removal
+                # (visible=True + CSS display:none, so Gradio event binding stays active)
+                remove_slot = gr.Textbox(value="", elem_id="remove-slot", visible=True)
 
                 with gr.Row(elem_id="input-btn-row"):
                     camera_btn = gr.Button("📷 Camera", variant="secondary", scale=1, size="lg", elem_id="camera-btn")
                     attach_btn = gr.Button("📎 Attach", variant="secondary", scale=1, size="lg", elem_id="attach-btn")
-                    analyze_btn = gr.Button("Analyze Case", variant="primary", scale=1, size="lg")
+                    analyze_btn = gr.Button("Analyze Case", variant="primary", scale=1, size="lg", visible=True)
+                    followup_btn = gr.Button("Submit Follow-up", variant="primary", scale=1, size="lg", visible=False)
                     reset_btn = gr.Button("Reset", variant="secondary", scale=0, visible=False, size="lg")
 
             # EVENT HANDLERS
@@ -1064,6 +1386,7 @@ hr {
                 - Images: tiny 28×28 square thumbnail + truncated name
                 - Other files: filename chip (truncated at 80 chars)
                 X button clicks the hidden Gradio remove button for that slot.
+                Filenames are HTML-escaped to prevent injection.
                 """
                 if not file_list:
                     return ""
@@ -1073,16 +1396,27 @@ hr {
                     ext = os.path.splitext(name)[1].lower()
                     is_image = ext in _IMAGE_EXTS
 
-                    # Truncate name at 80 chars
+                    # Truncate name at 80 chars, then HTML-escape
                     display_name = name if len(name) <= 80 else name[:80] + "..."
+                    display_name = _html.escape(display_name)
 
                     thumb_html = ""
                     if is_image:
-                        thumb_html = (
-                            f"<img src='/file={fp}' "
-                            f"style='width:28px;height:28px;object-fit:cover;"
-                            f"border-radius:3px;margin-right:5px;vertical-align:middle;'>"
-                        )
+                        try:
+                            import base64 as _b64
+                            from io import BytesIO as _BytesIO
+                            _thumb = Image.open(fp)
+                            _thumb.thumbnail((56, 56))  # 2x for retina, displayed at 28x28
+                            _buf = _BytesIO()
+                            _thumb.save(_buf, format="JPEG", quality=60)
+                            _b64_str = _b64.b64encode(_buf.getvalue()).decode("ascii")
+                            thumb_html = (
+                                f"<img src='data:image/jpeg;base64,{_b64_str}' "
+                                f"style='width:28px;height:28px;object-fit:cover;"
+                                f"border-radius:3px;margin-right:5px;vertical-align:middle;'>"
+                            )
+                        except Exception:
+                            thumb_html = ""
 
                     html_parts.append(
                         f"<span style='display:inline-flex; align-items:center; "
@@ -1091,7 +1425,7 @@ hr {
                         f"{thumb_html}"
                         f"<span style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
                         f"max-width:180px;vertical-align:middle;'>{display_name}</span>"
-                        f"<button onclick=\"document.querySelector('#remove-btn-{i} button').click();\""
+                        f"<button data-remove-slot='{i}'"
                         f" style='border:none;background:none;cursor:pointer;"
                         f"margin-left:5px;font-size:14px;color:#999;line-height:1;flex-shrink:0;'>×</button>"
                         f"</span>"
@@ -1100,14 +1434,18 @@ hr {
 
             # Track uploaded files from hidden gr.File
             def on_file_upload(files, current_files):
-                """Add newly uploaded files to the list (max 3)."""
+                """Add newly uploaded files to the list (max 3), with file size validation."""
                 if not files:
                     return current_files, format_file_display(current_files), None
                 new_files = files if isinstance(files, list) else [files]
                 updated = list(current_files) if current_files else []
                 for f in new_files:
-                    if len(updated) >= 3:
+                    if len(updated) >= MAX_FILES:
                         break
+                    error = MedGemmaApp._validate_file(f)
+                    if error:
+                        logger.warning(error)
+                        continue
                     updated.append(f)
                 return updated, format_file_display(updated), None
 
@@ -1129,21 +1467,50 @@ hr {
                 outputs=[camera_popup, webcam_img]
             )
 
-            # Use Photo — save captured image with timestamp name, add to file_state
-            import shutil, datetime as _dt
+            # Use Photo — save captured image with UUID name, add to file_state
+            import shutil, datetime as _dt, uuid as _uuid
+
+            def _cleanup_old_temp_images():
+                """Remove temp captured images older than TEMP_IMAGE_MAX_AGE_HOURS."""
+                try:
+                    temp_dir = Path(TEMP_IMAGE_DIR)
+                    if not temp_dir.exists():
+                        return
+                    import time
+                    cutoff = time.time() - (TEMP_IMAGE_MAX_AGE_HOURS * 3600)
+                    for f in temp_dir.glob("captured_*.jpeg"):
+                        try:
+                            if f.stat().st_mtime < cutoff:
+                                f.unlink()
+                                logger.debug(f"Cleaned up old temp image: {f.name}")
+                        except OSError:
+                            pass
+                except Exception as e:
+                    logger.debug(f"Temp image cleanup error (non-critical): {e}")
+
+            # Clean up old temp images on app startup
+            _cleanup_old_temp_images()
 
             def on_use_photo(img_path, current_files):
                 """Save captured image, add to file list, hide camera popup."""
                 if not img_path:
                     return current_files, format_file_display(current_files), gr.update(visible=False), None
-                os.makedirs("data/temp_images", exist_ok=True)
-                timestamp = _dt.datetime.now().strftime("%H-%M-%S")
-                dest = os.path.join("data/temp_images", f"captured_{timestamp}.jpeg")
-                shutil.copy2(img_path, dest)
-                updated = list(current_files) if current_files else []
-                if len(updated) < 3:
-                    updated.append(dest)
-                return updated, format_file_display(updated), gr.update(visible=False), None
+                try:
+                    os.makedirs(TEMP_IMAGE_DIR, exist_ok=True)
+                    # UUID filename prevents collisions (two captures in same second)
+                    unique_id = _uuid.uuid4().hex[:8]
+                    timestamp = _dt.datetime.now().strftime("%H-%M-%S")
+                    dest = os.path.join(TEMP_IMAGE_DIR, f"captured_{timestamp}_{unique_id}.jpeg")
+                    shutil.copy2(img_path, dest)
+                    updated = list(current_files) if current_files else []
+                    if len(updated) < MAX_FILES:
+                        updated.append(dest)
+                    # Clean up old temp images while we're at it
+                    _cleanup_old_temp_images()
+                    return updated, format_file_display(updated), gr.update(visible=False), None
+                except Exception as e:
+                    logger.error(f"Failed to save captured photo: {e}")
+                    return current_files, format_file_display(current_files), gr.update(visible=False), None
 
             camera_use_btn.click(
                 fn=on_use_photo,
@@ -1157,44 +1524,49 @@ hr {
                 js="() => { const el = document.querySelector('#hidden-file-upload input[type=file]'); if (el) el.click(); }"
             )
 
-            # Remove file handlers — one per slot (max 3 files)
-            def make_remove_fn(slot_idx):
-                def remove_file(current_files):
-                    updated = list(current_files) if current_files else []
-                    if 0 <= slot_idx < len(updated):
-                        updated.pop(slot_idx)
-                    return updated, format_file_display(updated)
-                return remove_file
+            # Remove file handler — JS writes slot index to hidden textbox, this fires
+            def on_remove_file(slot_str, current_files):
+                try:
+                    idx = int(slot_str)
+                except (ValueError, TypeError):
+                    return current_files, format_file_display(current_files), ""
+                updated = list(current_files) if current_files else []
+                if 0 <= idx < len(updated):
+                    removed = updated.pop(idx)
+                    logger.info(f"Removed file at slot {idx}: {os.path.basename(removed)}")
+                return updated, format_file_display(updated), ""
 
-            for _slot, _btn in enumerate([remove_btn_0, remove_btn_1, remove_btn_2]):
-                _btn.click(
-                    fn=make_remove_fn(_slot),
-                    inputs=[file_state],
-                    outputs=[file_state, file_display]
-                )
+            remove_slot.change(
+                fn=on_remove_file,
+                inputs=[remove_slot, file_state],
+                outputs=[file_state, file_display, remove_slot]
+            )
 
             # Example case buttons — load full case text into textbox
             example_btn_0.click(fn=lambda: gr.update(value=_CASE1_FULL), outputs=[text_input])
             example_btn_1.click(fn=lambda: gr.update(value=_CASE2_FULL), outputs=[text_input])
 
-            # Analyze Case / Follow-up button (routes based on mode)
-            def on_analyze(text, files):
-                """
-                Route to either process_case (new case) or process_followup (continuation).
-                Determines routing based on in_followup_mode flag.
-                """
+            # Single action button — dispatches based on current mode
+            def on_action(text, files):
+                file_list = files if files else []
                 if self.in_followup_mode:
-                    # Follow-up mode: continue existing session
-                    yield from self.process_followup(text)
+                    yield from self.process_followup(text, file_list)
                 else:
-                    # New case mode
-                    file_list = files if files else []
                     yield from self.process_case(text, file_list)
 
+            _outputs = [soap_output, reasoning_output, citations_output, text_input, analyze_btn, followup_btn, reset_btn, camera_btn, attach_btn]
+
             analyze_btn.click(
-                fn=on_analyze,
+                fn=on_action,
                 inputs=[text_input, file_state],
-                outputs=[soap_output, reasoning_output, citations_output, text_input, analyze_btn, reset_btn, camera_btn, attach_btn]
+                outputs=_outputs
+            )
+
+            # Follow-up button — same handler, just wired to the second button
+            followup_btn.click(
+                fn=on_action,
+                inputs=[text_input, file_state],
+                outputs=_outputs
             )
 
             # Reset button - clear everything, back to initial state
@@ -1204,6 +1576,7 @@ hr {
                 self.current_session = None
                 self.is_analyzing = False
                 self.in_followup_mode = False
+                self._clear_active_session()
                 return (
                     "",  # soap_output
                     "<span style='font-size:9px;'>Detailed clinical reasoning will be displayed here after case analysis.</span>",
@@ -1211,15 +1584,54 @@ hr {
                     "",  # text_input
                     [],  # file_state
                     "",  # file_display
-                    gr.update(value="Analyze Case", interactive=True),  # analyze_btn
-                    gr.update(visible=False),  # reset_btn
-                    gr.update(interactive=True),  # camera_btn
-                    gr.update(interactive=True),  # attach_btn
+                    gr.Button(visible=True, interactive=True),   # analyze_btn
+                    gr.Button(visible=False),                     # followup_btn
+                    gr.Button(visible=False),                     # reset_btn
+                    gr.Button(interactive=True),                  # camera_btn
+                    gr.Button(interactive=True),                  # attach_btn
                 )
 
             reset_btn.click(
                 fn=on_reset,
-                outputs=[soap_output, reasoning_output, citations_output, text_input, file_state, file_display, analyze_btn, reset_btn, camera_btn, attach_btn]
+                outputs=[soap_output, reasoning_output, citations_output, text_input, file_state, file_display, analyze_btn, followup_btn, reset_btn, camera_btn, attach_btn]
+            )
+
+            # Restore active follow-up session on page load (survives browser refresh)
+            def on_page_load():
+                restored = self._restore_active_session()
+                if restored:
+                    return restored
+                return (gr.skip(),) * 9  # no-op
+
+            app.load(
+                fn=on_page_load,
+                outputs=_outputs
+            )
+
+            # JS event delegation for file remove chips
+            # Clicking X writes the slot index into a hidden Gradio textbox,
+            # which triggers the .change() handler to remove the file.
+            app.load(
+                fn=None,
+                js="""
+                () => {
+                    document.addEventListener('click', function(e) {
+                        var btn = e.target.closest('[data-remove-slot]');
+                        if (!btn) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        var slot = btn.getAttribute('data-remove-slot');
+                        var el = document.querySelector('#remove-slot textarea, #remove-slot input');
+                        if (el) {
+                            var nativeSetter = Object.getOwnPropertyDescriptor(
+                                window.HTMLTextAreaElement.prototype || window.HTMLInputElement.prototype, 'value'
+                            ).set || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            nativeSetter.call(el, slot);
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                        }
+                    });
+                }
+                """
             )
 
         return app

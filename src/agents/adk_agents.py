@@ -107,6 +107,11 @@ def _sanitize_response(text: str) -> str:
     Valid JSON escape characters: \" \\ \/ \\b \\f \\n \\r \\t \\uXXXX
     Everything else (e.g., \\a, \\p, \\m) is invalid and replaced.
     """
+    # Strip MedGemma thinking tokens that sometimes leak into output
+    # e.g., "thoughtThe user wants me to..." → "The user wants me to..."
+    if text.startswith('thought'):
+        text = text[len('thought'):]
+    # Fix invalid JSON escape sequences
     return re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
 
 
@@ -346,15 +351,50 @@ def medgemma_triage_analysis(
     """
     logger.info("Calling MedGemma Specialist for triage analysis")
 
-    # Check if an image was attached — this is clinical information for dermatology
     image_path = _run_outputs.get("last_image_path")
-    image_note = (
-        "\n\nIMPORTANT: A clinical dermatology image has been attached to this case. "
-        "The image IS clinical information. Visual examination of the lesion IS sufficient "
-        "for dermatological triage — you can see the morphology, distribution, and color directly. "
-        "Treat the image as part of the case data when deciding sufficiency."
-        if image_path else ""
-    )
+
+    # ── Python pre-filter ─────────────────────────────────────────────────────
+    # MedGemma ignores triage instructions when "SOAP" appears in the input and
+    # just generates a SOAP note directly.  Detect "command-only" inputs in Python
+    # before calling MedGemma — this is 100% reliable and instant.
+    #
+    # Strategy: require at least ONE real demographic or time marker.
+    # Simple keywords like "diagnosis" or "treatment" are too weak —
+    # "Can you diagnose this?" would match.  Real clinical narratives almost
+    # always contain age (digits + year), gender, or a duration (N months/weeks).
+    import re as _re
+    CLINICAL_PATTERNS = [
+        r'\d+[\s\-]*year',            # "45-year", "45 year" → age
+        r'year[\s\-]*old',            # "year-old", "year old"
+        r'\b(male|female|man|woman|boy|girl|baby|infant|toddler|child|newborn|adolescent|teen|elderly)\b',   # gender/age group
+        r'\d+[\s\-]*(month|week|day)s?\b',         # "3 months", "2-week" → duration
+        r'presents?\s+with',          # "presents with" → clinical phrasing
+        r'chief\s+complaint',         # structured clinical intake
+        r'history\s+of',              # clinical history marker
+    ]
+    summary_lower = (case_summary or "").lower().strip()
+    has_clinical_content = any(_re.search(p, summary_lower) for p in CLINICAL_PATTERNS)
+
+    if not has_clinical_content and not image_path:
+        # No clinical text AND no image — skip MedGemma, return LACK INFORMATION directly
+        lack_msg = (
+            "LACK INFORMATION: I need more clinical details to generate a SOAP note.\n\n"
+            "Please provide:\n"
+            "1. **Patient age and gender** (e.g., 45-year-old female)\n"
+            "2. **Chief complaint** (main reason for visit)\n"
+            "3. **Duration of symptoms** (how long have they had this?)\n"
+            "4. **Relevant medical history** (prior conditions, medications, treatments)"
+        )
+        logger.info("Pre-filter: no clinical keywords and no image — returning LACK INFORMATION without calling MedGemma")
+        _run_outputs["last_triage_output"] = lack_msg
+        return {
+            "medgemma_analysis": lack_msg,
+            "missing_items": missing_items,
+            "specialist_used": "Pre-filter (no clinical content)"
+        }
+    # ── End pre-filter ────────────────────────────────────────────────────────
+
+    image_note = "\n\nA clinical image has been provided and is attached to this request." if image_path else ""
 
     prompt = f"""You are an expert dermatology triage specialist.
 
@@ -362,31 +402,38 @@ FULL CASE TEXT:
 {case_summary}{image_note}
 
 YOUR TASK:
-Read the case text above carefully. YOU decide whether there is sufficient clinical information to make a diagnosis.
-
-Judge by CONTENT, not format. A clinical narrative that describes the patient's demographics, symptoms, and lesion characteristics IS sufficient — even if it was entered as free text rather than structured fields.
+Read the case text above carefully. If a clinical image is attached, consider it as part of the available data (you can see lesion morphology, distribution, color). YOU decide whether there is sufficient clinical information to make a diagnosis.
 
 Decision rules:
-- A complete case needs BOTH: (1) some clinical context (patient age, chief complaint, or symptom duration) AND (2) either a lesion description or a clinical image.
-- If both are present → respond with: "DETAILS: Proceed with diagnosis." followed by a brief summary of key clinical findings.
-- If an image is attached but the text input is only a command like "provide SOAP" or "analyze this" with NO clinical context → this is LACK INFORMATION. Ask for: patient age, chief complaint, and duration of symptoms.
-- If there is clinical context but NO image and NO lesion description → ask for a description of the lesion or a clinical photo.
-- If genuinely nothing useful was provided → ask for age, chief complaint, duration, and a lesion description or photo.
+- If the case contains patient demographics AND symptoms/lesion description (from text OR visible in the image) → respond ONLY with: "DETAILS: Proceed with diagnosis."
+- If critical clinical context is missing → respond ONLY with: "LACK INFORMATION:" followed by specific clarifying questions.
 
-Do NOT ask for information that is already present in the case text or clearly visible in the image."""
+STRICT RULES — DO NOT VIOLATE:
+- Do NOT hallucinate or guess patient age, gender, or demographics from the image alone. Only use demographics explicitly stated in the text.
+- Do NOT invent symptoms, history, or findings that are not in the provided text or image.
+- If text says "skin changes" but does not describe them AND no image is provided, that IS missing information.
+- If text says "skin changes" and an image IS provided showing visible findings, the image counts as the description.
+
+Do NOT generate a SOAP note. Do NOT diagnose. Just assess completeness."""
 
     try:
         specialist = _get_medgemma_specialist()
         response = specialist.generate(
             prompt=prompt,
-            max_tokens=500,  # Keep triage concise — long output bloats diagnostic prompt input
+            max_tokens=300,
             temperature=0.0,
             **({"image_path": image_path} if image_path else {})
         )
         response = _sanitize_response(response)
 
+        # If MedGemma ignored instructions and generated a SOAP note anyway,
+        # treat the response as DETAILS (it means the case had enough info).
+        response_lower = response.lower()
+        if "lack information" not in response_lower and "details" not in response_lower:
+            logger.warning("MedGemma ignored triage instructions — treating as DETAILS (case had clinical content)")
+            response = "DETAILS: Proceed with diagnosis."
+
         # Store in thread-local so run_async() can retrieve MedGemma's actual output
-        # (Gemini will write its own bland summary in the text event — we need the real thing)
         _run_outputs["last_triage_output"] = response
 
         return {
@@ -537,8 +584,49 @@ def medgemma_clinical_diagnosis(
     # These are authoritative — Gemini's parameter values are bypassed entirely
     # because Gemini summarizes/truncates context when passing args to this tool.
     real_triage_notes = _run_outputs.get("last_triage_output") or 'No triage notes.'
-    real_research_context = _run_outputs.get("last_research_context") or 'No guidelines retrieved.'
+    real_research_context = _run_outputs.get("last_research_context") or ''
     image_path = _run_outputs.get("last_image_path")  # pass to every MedGemma generate() call
+
+    # Safety net: if ResearchAgent skipped RAG (Gemini non-determinism), force-call it now.
+    # This ensures every diagnosis has RAG citations when possible.
+    if not real_research_context and not _run_outputs.get("last_retrieved_guidelines"):
+        logger.warning("ResearchAgent skipped RAG — forcing retrieve_clinical_guidelines + medgemma_guideline_synthesis")
+        try:
+            # Extract medical keywords for a focused RAG query (3-8 words)
+            _stop = {
+                'a','an','the','is','was','were','been','being','have','has','had','do','does',
+                'did','will','would','shall','should','may','might','can','could','am','are',
+                'to','of','in','for','on','with','at','by','from','as','into','through',
+                'during','before','after','between','out','off','over','under','then','once',
+                'when','where','why','how','all','each','every','both','few','more','most',
+                'other','some','such','no','nor','not','only','own','same','so','than','too',
+                'very','just','because','but','and','or','if','who','which','that','this',
+                'these','those','it','its','he','she','they','them','their','his','her','him',
+                'presented','present','patient','man','woman','boy','girl','admitted','hospital',
+                'days','weeks','months','years','year','day','week','month','old','new','left',
+                'right','due','received','receiving','first','second','reported','noted','known',
+                'history','medical','cm','mm','diagnosis','also','upon','about','there','here',
+            }
+            _words = re.findall(r'[a-zA-Z-]+', case_data[:500])
+            _keywords = [w for w in _words if w.lower() not in _stop and len(w) > 2][:8]
+            rag_query = ' '.join(_keywords) if _keywords else case_data.split('.')[0][:100]
+            logger.info(f"Safety-net RAG query: '{rag_query}'")
+            rag_result = retrieve_clinical_guidelines(query=rag_query.strip(), n_results=5)
+            guidelines = rag_result.get("guidelines", [])
+            # Also force guideline synthesis
+            synth_result = medgemma_guideline_synthesis(
+                case_data=case_data,
+                retrieved_guidelines=guidelines
+            )
+            real_research_context = _run_outputs.get("last_research_context") or 'No guidelines retrieved.'
+            logger.info(f"Forced RAG retrieval: {len(guidelines)} guidelines, synthesis={len(real_research_context)} chars")
+        except Exception as e:
+            logger.error(f"Forced RAG retrieval failed: {e}")
+            real_research_context = 'No guidelines retrieved.'
+
+    if not real_research_context:
+        real_research_context = 'No guidelines retrieved.'
+
     logger.info(f"Using stored triage ({len(real_triage_notes)} chars) and research ({len(real_research_context)} chars), image={'yes' if image_path else 'no'}")
 
     # Route to the appropriate prompt based on triage verdict.
@@ -560,7 +648,12 @@ def medgemma_clinical_diagnosis(
         # Single-call SOAP (Option B) always truncates mid-sentence.
         # Fix: decompose into 8 focused micro-questions each answerable in ~15-50 chars,
         # then stitch answers into a formatted SOAP note.
-        ctx = f"Dermatology case: {case_data}"
+        ctx = (
+            f"Dermatology case: {case_data}\n"
+            f"STRICT: Only use information explicitly provided in the text or visible in the image. "
+            f"Do NOT hallucinate or guess patient age, gender, or demographics from the image. "
+            f"If a detail was not provided, say 'not provided' — do NOT invent it."
+        )
         specialist = _get_medgemma_specialist()
 
         _PREAMBLES = (
@@ -823,7 +916,11 @@ Your role is ORCHESTRATION, not clinical interpretation.
 MANDATORY STEPS — YOU MUST COMPLETE ALL 3 IN ORDER:
 
 Step 1: CALL retrieve_clinical_guidelines tool.
-  - Formulate a search query from key clinical features (symptoms, morphology, demographics).
+  - QUERY MUST BE SHORT (3-8 keywords). Do NOT paste the full case text as the query.
+  - Extract ONLY the most clinically significant terms: primary morphology, key symptom, body site.
+  - GOOD query examples: "erythematous plaque morbilliform arm vaccine reaction"
+  - GOOD query examples: "bullous pemphigoid vesicles elderly"
+  - BAD query: copying the entire patient description verbatim — this returns poor results.
   - If 0 results are returned, that is acceptable — proceed immediately to Step 2.
   - Do NOT retry with different queries if 0 results returned.
 
@@ -839,9 +936,11 @@ Step 3: CALL transfer_to_agent(agent_name='DiagnosticAgent').
 CRITICAL: DO NOT STOP after Step 1 or Step 2.
 You MUST always end by CALLING transfer_to_agent(agent_name='DiagnosticAgent').
 
-Search strategy:
-- Extract key features: symptoms, location, morphology, patient demographics
-- Focus queries on: differential diagnosis, diagnostic criteria, treatment
+Search strategy for building the query (Step 1):
+- Pick the 1-2 most distinctive morphology terms (e.g., "morbilliform papules", "annular plaque")
+- Add body site (e.g., "arm", "trunk", "face")
+- Add ONE key clinical context if relevant (e.g., "post-vaccine", "pediatric", "immunosuppressed")
+- Total query: 3-8 words maximum. Shorter is better for RAG similarity search.
 
 Summary format before transferring:
 - Search query used
@@ -1622,10 +1721,16 @@ class MedGemmaWorkflow:
         }
 
         # Complete and save session
-        # If this is a continuation (existing_session), do NOT save yet
-        # The caller will save after adding the follow-up step
+        # If this is a continuation (existing_session), do NOT save yet — caller saves.
+        # If the response looks like a pause (has questions, no SOAP), do NOT complete —
+        # the UI caller needs the session alive for follow-up.
+        _resp_lower = response_text.lower()
+        _is_pause = "?" in response_text and "subjective" not in _resp_lower and "assessment" not in _resp_lower
         if existing_session:
             logger.info(f"Continuation run complete. Session {session.session_id} kept open for caller to save.")
+        elif _is_pause:
+            logger.info(f"Pause detected — session {session.session_id} kept open for follow-up.")
+            session.save(self.conversation_manager.storage_dir)  # save progress but keep in active_sessions
         else:
             session.set_final_output(result)
             self.conversation_manager.complete_session(session.session_id, save=True)

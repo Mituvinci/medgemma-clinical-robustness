@@ -281,6 +281,16 @@ class MedGemmaApp:
             )
             return
 
+        # If user uploaded only an image (no text, no case files), inject default text
+        if not has_text and has_files:
+            image_exts = ('.jpg', '.jpeg', '.png')
+            only_images = all(
+                (f.lower() if isinstance(f, str) else f.name.lower()).endswith(image_exts)
+                for f in file_list
+            )
+            if only_images:
+                text_input = "Only clinical image has been provided."
+
         self.is_analyzing = True
 
         # Generate session_id once, use for both case_id and workflow
@@ -596,6 +606,19 @@ class MedGemmaApp:
         clean_response = _re.sub(r'(\d+)\.\s*', r'\n\n\1. ', clean_response)
         # Strip "LACK INFORMATION:" prefix — already shown in the heading
         clean_response = _re.sub(r'^.*?LACK\s+INFORMATION\s*:\s*', '', clean_response, flags=_re.IGNORECASE).strip()
+
+        # Cap at 5 most important questions to avoid overwhelming the user
+        lines = clean_response.split('\n')
+        question_lines = [l for l in lines if '?' in l]
+        non_question_lines = [l for l in lines if '?' not in l and l.strip()]
+        if len(question_lines) > 5:
+            question_lines = question_lines[:5]
+            # Renumber 1-5
+            renumbered = []
+            for i, q in enumerate(question_lines, 1):
+                q_text = _re.sub(r'^\s*\d+\.\s*', '', q).strip()
+                renumbered.append(f"{i}. {q_text}")
+            clean_response = '\n\n'.join(renumbered)
 
         formatted = "## Please Provide Additional Details\n\n"
         formatted += "To give you an accurate assessment, the specialist needs a bit more information:\n\n"

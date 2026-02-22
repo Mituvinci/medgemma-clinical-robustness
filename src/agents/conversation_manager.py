@@ -11,6 +11,7 @@ This is critical for the competition's explainability scoring (25% of total).
 """
 
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -124,6 +125,7 @@ class ConversationSession:
         """
         # Apply PII filtering
         filtered = pii_filter(json.dumps(input_data))
+        filtered = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', filtered)
         self.initial_input = json.loads(filtered)
         self.pii_redacted = True
 
@@ -316,6 +318,7 @@ class ConversationSession:
 
         # Apply PII filtering to entire step
         filtered = pii_filter(json.dumps(step))
+        filtered = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', filtered)
         step = json.loads(filtered)
 
         self.workflow_steps.append(step)
@@ -335,6 +338,7 @@ class ConversationSession:
         """
         # Apply PII filtering
         filtered = pii_filter(json.dumps(output_data))
+        filtered = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', filtered)
         self.final_output = json.loads(filtered)
 
     def complete(self):

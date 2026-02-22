@@ -661,7 +661,23 @@ def medgemma_clinical_diagnosis(
             "here is the", "the following", "i would recommend", "okay,", "sure,",
         )
 
+        _call_counter = [0]  # mutable counter for closure
+        _CALL_LABELS = [
+            "Primary Diagnosis",
+            "Confidence Score",
+            "Differentials",
+            "Supporting Evidence",
+            "Subjective (S)",
+            "Objective (O)",
+            "Diagnostic Tests",
+            "Treatment Plan",
+        ]
+
         def _ask(q):
+            _call_counter[0] += 1
+            n = _call_counter[0]
+            label = _CALL_LABELS[n - 1] if n <= len(_CALL_LABELS) else f"Call {n}"
+            print(f"\n  [{n}/8] MedGemma-27B :: {label}", flush=True)
             raw = specialist.generate(
                 prompt=f"{ctx}\nAnswer in one short sentence only, no preamble: {q}",
                 max_tokens=500,
@@ -675,6 +691,7 @@ def medgemma_clinical_diagnosis(
                     if cut != -1 and cut < 80:
                         raw = raw[cut+1:].strip()
                     break
+            print(f"         >>> {raw[:150]}{'...' if len(raw) > 150 else ''}", flush=True)
             return raw
 
         primary_dx    = _ask("What is the single most likely dermatological diagnosis? Reply with the diagnosis name only, in English, nothing else.")

@@ -9,6 +9,7 @@ Supports any MedGemma variant deployed as a Vertex AI endpoint
 import base64
 import json
 import logging
+import re
 import time
 from typing import Dict, Any, Optional
 
@@ -113,7 +114,7 @@ class VertexMedGemmaAdapter(BaseLLM):
 
             # Extract text from chatCompletions response.
             # response.predictions may be a list OR a dict depending on the deployment.
-            print(f"\n===RAW PREDICTIONS TYPE: {type(response.predictions)}===\n{repr(response.predictions)[:500]}\n", flush=True)
+            print(f"\n[MedGemma-27B] Raw response received", flush=True)
             preds = response.predictions
             if isinstance(preds, list) and len(preds) > 0:
                 result = preds[0]
@@ -135,7 +136,7 @@ class VertexMedGemmaAdapter(BaseLLM):
             else:
                 text = str(result)
 
-            print(f"\n===RAW VERTEX RESPONSE ({len(text)} chars)===\n{repr(text)}\n===END RAW===\n", flush=True)
+            print(f"[MedGemma-27B] >>> {text[:200]}{'...' if len(text) > 200 else ''}", flush=True)
 
             # One-click-deploy endpoints echo the full prompt before the response.
             # Strip everything up to and including the last "Output:" marker.
@@ -240,6 +241,9 @@ Response (JSON only):"""
             if json_str.endswith("```"):
                 json_str = json_str[:-3]
             json_str = json_str.strip()
+
+            # Sanitize invalid JSON escape sequences (e.g., \a, \p from medical notation)
+            json_str = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_str)
 
             parsed = json.loads(json_str)
             logger.debug("Successfully parsed structured output from Vertex AI MedGemma")

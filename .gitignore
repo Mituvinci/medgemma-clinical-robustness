@@ -26,15 +26,10 @@ logs/
 NEJM/
 NEJIM/
 
-JAADCR
-design
+JAADCR/
+design/
 
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
 
 
 # Temporary files

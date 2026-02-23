@@ -53,7 +53,7 @@ The workflow **pauses** -- no diagnosis attempted. This is the core safety behav
 
 ---
 
-![Complete case (diagnosis provided):](assets/ui_interface_git.png)
+
 
 ## Evaluation
 
@@ -131,6 +131,8 @@ python scripts/evaluate_jdcr_cases.py \
 ```
 
 ---
+
+![Complete case (diagnosis provided):](assets/ui_interface_git.png)
 
 ## JAADCR Data Pipeline
 

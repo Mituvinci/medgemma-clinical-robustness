@@ -54,6 +54,9 @@ class VertexMedGemmaAdapter(BaseLLM):
         self.region = region
         self.endpoint_id = endpoint_id
 
+        # Human-readable label derived from model_id (e.g. "google/medgemma-27b-it" → "MedGemma-27B-IT")
+        self._model_label = model_id.split("/")[-1].replace("medgemma", "MedGemma")
+
         # Initialize Vertex AI
         aiplatform.init(project=project_id, location=region)
         self.endpoint = aiplatform.Endpoint(endpoint_id)
@@ -114,7 +117,7 @@ class VertexMedGemmaAdapter(BaseLLM):
 
             # Extract text from chatCompletions response.
             # response.predictions may be a list OR a dict depending on the deployment.
-            print(f"\n[MedGemma-27B] Raw response received", flush=True)
+            print(f"\n[{self._model_label}] Raw response received", flush=True)
             preds = response.predictions
             if isinstance(preds, list) and len(preds) > 0:
                 result = preds[0]
@@ -136,7 +139,7 @@ class VertexMedGemmaAdapter(BaseLLM):
             else:
                 text = str(result)
 
-            print(f"[MedGemma-27B] >>> {text[:200]}{'...' if len(text) > 200 else ''}", flush=True)
+            print(f"[{self._model_label}] >>> {text[:200]}{'...' if len(text) > 200 else ''}", flush=True)
 
             # One-click-deploy endpoints echo the full prompt before the response.
             # Strip everything up to and including the last "Output:" marker.

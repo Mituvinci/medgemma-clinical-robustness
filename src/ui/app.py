@@ -29,6 +29,13 @@ MAX_FILES = 3
 TEMP_IMAGE_DIR = "data/temp_images"
 TEMP_IMAGE_MAX_AGE_HOURS = 2   # Clean up temp images older than this
 
+_PLACEHOLDER_DEFAULT = (
+    "Describe your case (history, exam findings, age, symptoms, duration...) "
+    "and/or attach files (image, PDF, JSON, text -- max 3 files). "
+    "Or click an example from above for quick analysis."
+)
+_PLACEHOLDER_WORKING = "MedGemma Clinical Robustness is analyzing your case... please wait"
+
 from src.agents.adk_agents import create_workflow
 from src.utils.schemas import ClinicalCase, ContextState
 from config.config import settings
@@ -212,9 +219,9 @@ class MedGemmaApp:
                 data.get("last_response_text", ""),
                 data.get("last_reasoning_text", ""),
                 data.get("last_citations_text", ""),
-                gr.Textbox(value="", interactive=True),
+                gr.Textbox(value="", interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                 gr.Button(visible=False),                     # analyze_btn: hidden
-                gr.Button(visible=True, interactive=True),    # followup_btn: SHOW
+                gr.Group(visible=True),                       # followup_group: SHOW
                 gr.Button(visible=True),                      # reset_btn
                 gr.Button(interactive=True),                  # camera_btn
                 gr.Button(interactive=True),                  # attach_btn
@@ -272,16 +279,19 @@ class MedGemmaApp:
                 "- Attach a case file (.txt, .json, .pdf)\n"
                 "- Attach a clinical image (.jpg, .png)",
                 "", "",
-                gr.Textbox(interactive=True),
+                gr.Textbox(interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                 gr.Button(visible=True, interactive=True),   # analyze_btn
-                gr.Button(visible=False),                     # followup_btn
+                gr.Group(visible=False),                      # followup_group: hidden
                 gr.Button(visible=False),                     # reset_btn
                 gr.Button(interactive=True),                  # camera_btn
                 gr.Button(interactive=True),                  # attach_btn
             )
             return
 
-        # If user uploaded only an image (no text, no case files), inject default text
+        # If user uploaded only an image (no text, no case files), inject default text.
+        # Track this so we can force an agentic pause regardless of what the model generates —
+        # an image alone is never sufficient clinical context for a diagnosis.
+        is_image_only_submission = False
         if not has_text and has_files:
             image_exts = ('.jpg', '.jpeg', '.png')
             only_images = all(
@@ -289,7 +299,10 @@ class MedGemmaApp:
                 for f in file_list
             )
             if only_images:
-                text_input = "Only clinical image has been provided."
+                n_images = len(file_list)
+                img_word = "image" if n_images == 1 else f"{n_images} images"
+                text_input = f"[Image-only submission: {img_word} attached, no case description provided]"
+                is_image_only_submission = True
 
         self.is_analyzing = True
 
@@ -299,15 +312,22 @@ class MedGemmaApp:
         # Build case from inputs BEFORE clearing
         case_data = self.build_case_from_inputs(text_input, file_list, session_id)
 
-        # STATE: Analyzing — keep text visible (clinical tool UX: user sees what was submitted)
+        # STATE: Analyzing — if user typed text, keep it visible (locked).
+        # For image-only submissions the textbox shows a status value (placeholder
+        # updates are not reliable in Gradio 6.x generators; setting value is).
+        _processing_textbox = (
+            gr.Textbox(value=_PLACEHOLDER_WORKING, interactive=False)
+            if is_image_only_submission
+            else gr.Textbox(interactive=False)
+        )
         yield (
             "Processing your case...",  # soap_output
             "",  # reasoning_output
             "",  # citations_output
-            gr.Textbox(interactive=False),  # text_input: keep text, just lock it
+            _processing_textbox,
             gr.Button(visible=False, interactive=False),  # analyze_btn: hide during processing
-            gr.Button(visible=False),                      # followup_btn: hidden
-            gr.Button(visible=False),                      # reset_btn
+            gr.Group(visible=False),                       # followup_group: hidden
+            gr.Button(visible=True, interactive=True),     # reset_btn: SHOW during processing
             gr.Button(interactive=False),                  # camera_btn
             gr.Button(interactive=False),                  # attach_btn
         )
@@ -335,6 +355,10 @@ class MedGemmaApp:
             response_text = result.get("response", "No diagnosis generated.")
             soap_note = response_text
             is_pause = self._detect_missing_data(response_text)
+            # Image-only submissions must always pause — images alone are never enough
+            # for a diagnosis regardless of what the model generates.
+            if is_image_only_submission:
+                is_pause = True
             reasoning = self._extract_thinking_process(response_text, result)
             citations = self._extract_citations(response_text, is_pause=is_pause, result=result)
             if is_pause:
@@ -353,9 +377,9 @@ class MedGemmaApp:
                     formatted_pause,
                     reasoning,
                     citations,
-                    gr.Textbox(value="", interactive=True),
+                    gr.Textbox(value="", interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                     gr.Button(visible=False),                     # analyze_btn: HIDE
-                    gr.Button(visible=True, interactive=True),    # followup_btn: SHOW
+                    gr.Group(visible=True),                       # followup_group: SHOW
                     gr.Button(visible=True),                      # reset_btn
                     gr.Button(interactive=True),                  # camera_btn
                     gr.Button(interactive=True),                  # attach_btn
@@ -371,10 +395,10 @@ class MedGemmaApp:
                     self._format_soap_response(soap_note),
                     reasoning,
                     citations,
-                    gr.Textbox(value="", interactive=True),
+                    gr.Textbox(value="", interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                     gr.Button(visible=True, interactive=True),    # analyze_btn: SHOW
-                    gr.Button(visible=False),                     # followup_btn: HIDE
-                    gr.Button(visible=False),                     # reset_btn
+                    gr.Group(visible=False),                      # followup_group: hidden
+                    gr.Button(visible=True),                      # reset_btn: SHOW after SOAP
                     gr.Button(interactive=True),                  # camera_btn
                     gr.Button(interactive=True),                  # attach_btn
                 )
@@ -390,9 +414,9 @@ class MedGemmaApp:
                 f"Error: {str(e)}",
                 "",
                 "",
-                gr.Textbox(value="", interactive=True),
+                gr.Textbox(value="", interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                 gr.Button(visible=True, interactive=True),    # analyze_btn
-                gr.Button(visible=False),                     # followup_btn
+                gr.Group(visible=False),                      # followup_group: hidden
                 gr.Button(visible=False),                     # reset_btn
                 gr.Button(interactive=True),                  # camera_btn
                 gr.Button(interactive=True),                  # attach_btn
@@ -410,9 +434,9 @@ class MedGemmaApp:
                 "Error: Not in follow-up mode. Please start a new case.",
                 "",
                 "",
-                gr.Textbox(interactive=True),
+                gr.Textbox(interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                 gr.Button(visible=True, interactive=True),    # analyze_btn
-                gr.Button(visible=False),                     # followup_btn
+                gr.Group(visible=False),                      # followup_group: hidden
                 gr.Button(visible=False),                     # reset_btn
                 gr.Button(interactive=True),                  # camera_btn
                 gr.Button(interactive=True),                  # attach_btn
@@ -421,15 +445,22 @@ class MedGemmaApp:
 
         self.is_analyzing = True
 
-        # STATE: Analyzing — keep user's follow-up text visible while processing
+        # STATE: Analyzing — keep user's follow-up text visible while processing.
+        # If textbox was empty (file-only follow-up), show status as value.
+        _has_followup_text = bool(user_response and user_response.strip())
+        _fu_processing_textbox = (
+            gr.Textbox(value=_PLACEHOLDER_WORKING, interactive=False)
+            if not _has_followup_text
+            else gr.Textbox(interactive=False)
+        )
         yield (
             "Processing your follow-up response...",
             "",
             "",
-            gr.Textbox(interactive=False),  # lock textbox, keep text visible
+            _fu_processing_textbox,
             gr.Button(visible=False),                         # analyze_btn: hidden
-            gr.Button(visible=False, interactive=False),      # followup_btn: hidden during processing
-            gr.Button(visible=False),                         # reset_btn
+            gr.Group(visible=False),                          # followup_group: hidden
+            gr.Button(visible=True, interactive=True),        # reset_btn: SHOW during processing
             gr.Button(interactive=False),                     # camera_btn
             gr.Button(interactive=False),                     # attach_btn
         )
@@ -484,9 +515,9 @@ class MedGemmaApp:
                     formatted_followup,
                     reasoning,
                     citations,
-                    gr.Textbox(value="", interactive=True),
+                    gr.Textbox(value="", interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                     gr.Button(visible=False),                     # analyze_btn: hidden
-                    gr.Button(visible=True, interactive=True),    # followup_btn: SHOW
+                    gr.Group(visible=True),                       # followup_group: SHOW
                     gr.Button(visible=True),                      # reset_btn
                     gr.Button(interactive=True),                  # camera_btn
                     gr.Button(interactive=True),                  # attach_btn
@@ -513,10 +544,10 @@ class MedGemmaApp:
                     self._format_soap_response(soap_note),
                     reasoning,
                     citations,
-                    gr.Textbox(value="", interactive=True),
+                    gr.Textbox(value="", interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                     gr.Button(visible=True, interactive=True),    # analyze_btn: SHOW
-                    gr.Button(visible=False),                     # followup_btn: hidden
-                    gr.Button(visible=False),                     # reset_btn
+                    gr.Group(visible=False),                      # followup_group: hidden
+                    gr.Button(visible=True),                      # reset_btn: SHOW after SOAP
                     gr.Button(interactive=True),                  # camera_btn
                     gr.Button(interactive=True),                  # attach_btn
                 )
@@ -532,9 +563,9 @@ class MedGemmaApp:
                 f"Error processing follow-up: {str(e)}",
                 "",
                 "",
-                gr.Textbox(value="", interactive=True),
+                gr.Textbox(value="", interactive=True, placeholder=_PLACEHOLDER_DEFAULT),
                 gr.Button(visible=True, interactive=True),    # analyze_btn
-                gr.Button(visible=False),                     # followup_btn
+                gr.Group(visible=False),                      # followup_group: hidden
                 gr.Button(visible=False),                     # reset_btn
                 gr.Button(interactive=True),                  # camera_btn
                 gr.Button(interactive=True),                  # attach_btn
@@ -575,10 +606,9 @@ class MedGemmaApp:
         ]
         has_missing_keywords = any(keyword in response_lower[:500] for keyword in missing_keywords)
 
-        # Agentic pause if:
-        # - Has questions AND no complete SOAP, OR
-        # - Has explicit missing data keywords
-        is_pause = (has_questions and not has_complete_soap) or has_missing_keywords
+        # Agentic pause if response has no complete SOAP AND (has questions OR missing keywords).
+        # has_complete_soap always wins -- a full SOAP is never a pause, even if keywords appear.
+        is_pause = not has_complete_soap and (has_questions or has_missing_keywords)
 
         if is_pause:
             logger.info(f"Agentic pause detected: questions={has_questions}, soap={has_complete_soap}, keywords={has_missing_keywords}")
@@ -1183,8 +1213,8 @@ hr {
 }
 
 
-
-</style>""")
+</style>
+""")
 
             # Hidden file upload (CSS hides it, but stays in DOM so JS can trigger it)
             file_upload = gr.File(
@@ -1328,7 +1358,7 @@ hr {
                     example_btn_0 = gr.Button(
                         value=(
                             "Case 1 : 73M, post-vaccine rash:  "
-                            + _CASE1_FULL[:50] + "..."
+                            + _CASE1_FULL[:215] + "..."
                         ),
                         variant="secondary",
                         elem_id="example-btn-0",
@@ -1336,7 +1366,7 @@ hr {
                     example_btn_1 = gr.Button(
                         value=(
                             "Case 2 : 10M, tense bullae:  "
-                            + _CASE2_FULL[:50] + "..."
+                            + _CASE2_FULL[:217] + "..."
                         ),
                         variant="secondary",
                         elem_id="example-btn-1",
@@ -1397,7 +1427,8 @@ hr {
                     camera_btn = gr.Button("📷 Camera", variant="secondary", scale=1, size="lg", elem_id="camera-btn")
                     attach_btn = gr.Button("📎 Attach", variant="secondary", scale=1, size="lg", elem_id="attach-btn")
                     analyze_btn = gr.Button("Analyze Case", variant="primary", scale=1, size="lg", visible=True)
-                    followup_btn = gr.Button("Submit Follow-up", variant="primary", scale=1, size="lg", visible=False)
+                    with gr.Group(visible=False) as followup_group:
+                        followup_btn = gr.Button("Submit Follow-up", variant="primary", size="lg")
                     reset_btn = gr.Button("Reset", variant="secondary", scale=0, visible=False, size="lg")
 
             # EVENT HANDLERS
@@ -1577,7 +1608,7 @@ hr {
                 else:
                     yield from self.process_case(text, file_list)
 
-            _outputs = [soap_output, reasoning_output, citations_output, text_input, analyze_btn, followup_btn, reset_btn, camera_btn, attach_btn]
+            _outputs = [soap_output, reasoning_output, citations_output, text_input, analyze_btn, followup_group, reset_btn, camera_btn, attach_btn]
 
             analyze_btn.click(
                 fn=on_action,
@@ -1604,11 +1635,11 @@ hr {
                     "",  # soap_output
                     "<span style='font-size:9px;'>Detailed clinical reasoning will be displayed here after case analysis.</span>",
                     "<span style='font-size:9px;'>Relevant clinical guidelines and evidence-based references will be displayed here.</span>",
-                    "",  # text_input
+                    gr.Textbox(value="", placeholder=_PLACEHOLDER_DEFAULT),  # text_input: fully reset
                     [],  # file_state
                     "",  # file_display
                     gr.Button(visible=True, interactive=True),   # analyze_btn
-                    gr.Button(visible=False),                     # followup_btn
+                    gr.Group(visible=False),                      # followup_group: hidden
                     gr.Button(visible=False),                     # reset_btn
                     gr.Button(interactive=True),                  # camera_btn
                     gr.Button(interactive=True),                  # attach_btn
@@ -1616,7 +1647,7 @@ hr {
 
             reset_btn.click(
                 fn=on_reset,
-                outputs=[soap_output, reasoning_output, citations_output, text_input, file_state, file_display, analyze_btn, followup_btn, reset_btn, camera_btn, attach_btn]
+                outputs=[soap_output, reasoning_output, citations_output, text_input, file_state, file_display, analyze_btn, followup_group, reset_btn, camera_btn, attach_btn]
             )
 
             # Restore active follow-up session on page load (survives browser refresh)
@@ -1641,6 +1672,8 @@ hr {
                     document.addEventListener('click', function(e) {
                         var btn = e.target.closest('[data-remove-slot]');
                         if (!btn) return;
+                        // Block removal if processing is active
+                        if (window.__mgProcessing) { e.preventDefault(); e.stopPropagation(); return; }
                         e.preventDefault();
                         e.stopPropagation();
                         var slot = btn.getAttribute('data-remove-slot');
@@ -1653,6 +1686,65 @@ hr {
                             el.dispatchEvent(new Event('input', {bubbles: true}));
                         }
                     });
+                }
+                """
+            )
+
+            # JS: disable file chips + show placeholder animation during processing.
+            # <script> tags inside gr.HTML do NOT execute in Gradio 6 — must use app.load(js=...).
+            app.load(
+                fn=None,
+                js="""
+                () => {
+                    window.__mgProcessing = false;
+                    var _sawDisabled = false;
+                    var WORKING_PH = "MedGemma Clinical Robustness is analyzing your case... please wait";
+
+                    function getTA() { return document.querySelector('#case-input textarea'); }
+
+                    function setChipsDisabled(off) {
+                        var fd = document.querySelector('#file-display');
+                        if (fd) { fd.style.pointerEvents = off ? 'none' : ''; fd.style.opacity = off ? '0.5' : ''; }
+                    }
+
+                    function applyPlaceholder() {
+                        var ta = getTA();
+                        if (ta && !ta.value.trim()) ta.placeholder = WORKING_PH;
+                    }
+
+                    document.addEventListener('click', function(e) {
+                        var btn = e.target.closest('button');
+                        if (!btn) return;
+                        var t = btn.textContent.trim();
+                        if (t.indexOf('Analyze Case') === -1 && t.indexOf('Submit Follow-up') === -1) return;
+                        window.__mgProcessing = true;
+                        _sawDisabled = false;
+                        setChipsDisabled(true);
+                        applyPlaceholder();
+                    }, true);
+
+                    setInterval(function() {
+                        if (!window.__mgProcessing) return;
+                        var ta = getTA();
+                        if (!ta) return;
+                        var isOff = ta.disabled || ta.readOnly;
+                        if (isOff) {
+                            _sawDisabled = true;
+                            setChipsDisabled(true);
+                            applyPlaceholder();
+                        }
+                        if (!isOff && _sawDisabled) {
+                            window.__mgProcessing = false;
+                            _sawDisabled = false;
+                            setChipsDisabled(false);
+                        }
+                    }, 300);
+
+                    setTimeout(function() {
+                        if (window.__mgProcessing) {
+                            window.__mgProcessing = false; _sawDisabled = false; setChipsDisabled(false);
+                        }
+                    }, 120000);
                 }
                 """
             )

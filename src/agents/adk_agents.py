@@ -394,9 +394,42 @@ def medgemma_triage_analysis(
         }
     # ── End pre-filter ────────────────────────────────────────────────────────
 
+    # ── Image-only detection ──────────────────────────────────────────────────
+    # When user uploads only image(s) with no clinical text history, we still
+    # call MedGemma but with a prompt that forces it to ask for missing info.
+    # An image alone (no age, gender, history, duration) is NEVER sufficient.
+    _is_image_only = image_path and not has_clinical_content
+    # ── End image-only detection ──────────────────────────────────────────────
+
     image_note = "\n\nA clinical image has been provided and is attached to this request." if image_path else ""
 
-    prompt = f"""You are an expert dermatology triage specialist.
+    if _is_image_only:
+        prompt = f"""You are an expert dermatology triage specialist.
+
+A clinical image has been provided but NO clinical history, patient demographics, or symptom description was given.
+
+YOUR TASK:
+Look at the attached clinical image. Describe what you observe in the image (lesion morphology, color, distribution, pattern). Then ask the user for the missing clinical information needed before any diagnosis can be made.
+
+You MUST respond with "LACK INFORMATION:" followed by:
+- A brief description of what you see in the image
+- Specific questions asking for the missing information
+
+You MUST ask about ALL of the following:
+1. Patient age and gender
+2. Chief complaint / reason for visit
+3. Duration of symptoms
+4. Location on the body (if not clear from image)
+5. Relevant medical history, medications, allergies
+
+STRICT RULES:
+- Do NOT generate a SOAP note
+- Do NOT provide a diagnosis or differential
+- Do NOT guess patient demographics from the image
+- You MUST start your response with "LACK INFORMATION:"
+"""
+    else:
+        prompt = f"""You are an expert dermatology triage specialist.
 
 FULL CASE TEXT:
 {case_summary}{image_note}
@@ -426,12 +459,22 @@ Do NOT generate a SOAP note. Do NOT diagnose. Just assess completeness."""
         )
         response = _sanitize_response(response)
 
-        # If MedGemma ignored instructions and generated a SOAP note anyway,
-        # treat the response as DETAILS (it means the case had enough info).
+        # If MedGemma ignored instructions and generated a SOAP note anyway:
+        # - Image-only: force LACK INFORMATION (image alone is never enough)
+        # - Normal case with clinical text: treat as DETAILS (case had enough info)
         response_lower = response.lower()
         if "lack information" not in response_lower and "details" not in response_lower:
-            logger.warning("MedGemma ignored triage instructions — treating as DETAILS (case had clinical content)")
-            response = "DETAILS: Proceed with diagnosis."
+            if _is_image_only:
+                logger.warning("MedGemma ignored image-only triage instructions — forcing LACK INFORMATION")
+                response = "LACK INFORMATION: " + response
+            else:
+                logger.warning("MedGemma ignored triage instructions — treating as DETAILS (case had clinical content)")
+                response = "DETAILS: Proceed with diagnosis."
+        elif _is_image_only and "details" in response_lower and "lack information" not in response_lower:
+            # MedGemma said DETAILS for image-only — override to LACK INFORMATION
+            logger.warning("MedGemma said DETAILS for image-only case — forcing LACK INFORMATION")
+            response = response.replace("DETAILS", "LACK INFORMATION", 1)
+            response = response.replace("Proceed with diagnosis.", "Additional clinical information is needed.", 1)
 
         # Store in thread-local so run_async() can retrieve MedGemma's actual output
         _run_outputs["last_triage_output"] = response

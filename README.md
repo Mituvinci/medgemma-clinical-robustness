@@ -204,4 +204,5 @@ python scripts/evaluate_jdcr_cases.py \
 
 ---
 
-![Apache_2.0_license](assets/LICENSE)
+## License
+This project is licensed under the Apache License 2.0 - see the [LICENSE](assets/LICENSE) file for details.

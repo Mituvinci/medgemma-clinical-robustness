@@ -114,7 +114,7 @@ Deploy MedGemma models via Vertex AI Model Garden (one-click deploy), then updat
 
 ```bash
 # Launch Gradio UI
-bash bin/run_gradio_demo.sh
+python main.py --mode app
 
 # Run evaluation (test with 1 case)
 python scripts/evaluate_jdcr_cases.py \

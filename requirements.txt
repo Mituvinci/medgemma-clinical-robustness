@@ -50,5 +50,3 @@ flake8==7.1.1
 mypy==1.14.1
 bitsandbytes==0.49.1  # 4-bit quantization for local GPU
 
-# Audio Processing (compatible with PyTorch 2.10.0)
-torchaudio==2.10.0

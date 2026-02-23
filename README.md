@@ -27,6 +27,8 @@ Two-tier hybrid system:
 
 ### Example: Multi-Agent Workflow in Action
 
+![Multi-Agent Workflow](assets/workflow_diagram.jpg)
+
 **Complete case (diagnosis provided):**
 
 > *Input:* "A 45-year-old woman presents with a 3-week history of an itchy, scaly, well-demarcated erythematous plaque on her right elbow. No new medications. Family history of autoimmune disease. On exam: silvery-white scale on an erythematous base, Auspitz sign positive."
@@ -121,14 +123,14 @@ python scripts/evaluate_jdcr_cases.py \
 # Run full evaluation (with MCQ options)
 python scripts/evaluate_jdcr_cases.py \
   --input JAADCR/jaadcr_input_with_options \
-  --agent-model medgemma-1.5-4b-it-vertex
+  --agent-model medgemma-vertex
 ```
 
 ---
 
 ## JAADCR Data Pipeline
 
-Reproducible 3-step pipeline for preprocessing JDCR Case Challenge PDFs into evaluation format.
+Reproducible 4-stage pipeline for preprocessing JDCR Case Challenge PDFs into evaluation format.
 
 **Requirements**: PyMuPDF (`pip install PyMuPDF`), Google Gemini API key.
 
@@ -136,7 +138,7 @@ Reproducible 3-step pipeline for preprocessing JDCR Case Challenge PDFs into eva
 # Step 0: Extract raw text and images from each PDF (PyMuPDF)
 #   Input:  folder of MM_YYYY_JDCR.pdf files
 #   Output: backup_extracted/ — one subfolder per PDF with text/ and images/ inside
-python scripts/jdcr_data_downlaod_preprocess/0_extract_pdf_text_images.py \
+python scripts/jdcr_data_downlaod_preprocess/stage_0_extract_pdf_text_images.py \
   --input ./pdf_input \
   --output ./backup_extracted
 
@@ -166,7 +168,7 @@ python scripts/evaluate_jdcr_cases.py \
 
 | Step | Script | Input | Output |
 |------|--------|-------|--------|
-| 0 | `0_extract_pdf_text_images.py` | PDF folder | `backup_extracted/{case}/text/*.txt` + `images/*.jpeg` |
+| 0 | `stage_0_extract_pdf_text_images.py` | PDF folder | `backup_extracted/{case}/text/*.txt` + `images/*.jpeg` |
 | 1 | `stage_1_extract_and_split.py` | `backup_extracted/` | `jaadcr_input/` + `jaadcr_input_with_options/` + `case_metadata/` |
 | 2 | `stage_2_build_ground_truth.py` | `case_metadata/` | `JAADCR_Groundtruth.csv` |
 | 3 | `evaluate_jdcr_cases.py` | `jaadcr_input/` | Evaluation JSON + Markdown summary |
@@ -191,12 +193,10 @@ python scripts/evaluate_jdcr_cases.py \
 - **JAAD Case Reports** (Elsevier, CC BY-NC-ND 4.0) — evaluation dataset and knowledge base source
 - **American Academy of Dermatology (AAD)** — clinical guidelines used in RAG knowledge base
 - **StatPearls** (NCBI) — clinical reference material used in RAG knowledge base
-- **NEJM Image Challenge** — additional evaluation benchmark used during development (© NEJM, educational use only; not distributed or included in this repository)
+- **NEJM Image Challenge** — exploratory evaluation benchmark used during development (© NEJM, educational use only; not distributed or included in this repository)
 - **Google MedGemma** — medical foundation models (HAI-DEF collection)
 - **Google ADK, Vertex AI** — agent framework and cloud infrastructure
 
 ---
 
-Apache 2.0 License
-
-Last Updated: February 19, 2026
+Last Updated: February 22, 2026

@@ -23,7 +23,7 @@ class TestConfiguration:
     def test_default_values(self):
         """Test that default configuration values are set."""
         assert settings.medgemma_model_id == "google/medgemma-27b-it"
-        assert settings.gemini_model_id == "gemini-pro"
+        assert settings.gemini_model_id == "gemini-pro-latest"
         assert settings.chunk_size == 512
         assert settings.chunk_overlap == 50
 

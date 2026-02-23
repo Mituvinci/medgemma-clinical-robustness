@@ -6,6 +6,7 @@
 # Documentation (only README.md is public)
 *.md
 !README.md
+!data/examples/README.md
 
 # Python
 __pycache__/
@@ -64,6 +65,7 @@ data/chroma/
 *.json
 !mock_cases.json
 !**/test_*.json
+!data/examples/*.json
 
 # Jupyter Notebooks
 .ipynb_checkpoints/

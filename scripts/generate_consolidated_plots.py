@@ -45,11 +45,11 @@ import seaborn as sns
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Publication style ─────────────────────────────────────────────────────────
-# All font sizes >= 14 for readability in printed/PDF format.
+# Uniform large fonts across all plots for print/PDF readability.
 plt.rcParams.update({
-    'font.size':          14,
-    'axes.titlesize':     16,
-    'axes.labelsize':     14,
+    'font.size':          15,
+    'axes.titlesize':     17,
+    'axes.labelsize':     15,
     'xtick.labelsize':    14,
     'ytick.labelsize':    14,
     'legend.fontsize':    13,
@@ -57,7 +57,7 @@ plt.rcParams.update({
     'figure.dpi':         150,
     'savefig.dpi':        300,
 })
-sns.set_theme(style="whitegrid", font_scale=1.2)
+sns.set_theme(style="whitegrid", font_scale=1.25)
 
 # ── Label helpers ─────────────────────────────────────────────────────────────
 
@@ -187,9 +187,8 @@ def _acc_att(top1_pct: float, pause_pct: float, total: int = 25) -> float:
 
 def plot_accuracy_overview(entries: list, dataset: str, out_dir: str):
     """
-    Grouped bar chart — original variant.
-    Bars: Top-1, Top-3, Top-4, Any-Rank.
-    Line overlay: Pause Rate.
+    Grouped bar chart -- original variant (publication quality).
+    Bars: Top-1, Top-3, Top-4, Any-Rank.  Line overlay: Pause Rate.
     """
     labels  = [e['label']    for e in entries]
     top1    = [e['top1']     for e in entries]
@@ -200,9 +199,9 @@ def plot_accuracy_overview(entries: list, dataset: str, out_dir: str):
 
     n = len(labels)
     x = np.arange(n)
-    bar_w = 0.18
+    bar_w = 0.19
 
-    fig, ax1 = plt.subplots(figsize=(14, 7))
+    fig, ax1 = plt.subplots(figsize=(12, 6))
 
     offsets    = [-1.5, -0.5, 0.5, 1.5]
     colors     = ['#4C72B0', '#55A868', '#DD8452', '#8172B3']
@@ -211,36 +210,38 @@ def plot_accuracy_overview(entries: list, dataset: str, out_dir: str):
     bars = []
     for off, col, lbl, vals in zip(offsets, colors, bar_labels,
                                    [top1, top3, top4, anyrank]):
-        b = ax1.bar(x + off * bar_w, vals, bar_w, label=lbl, color=col, alpha=0.85)
+        b = ax1.bar(x + off * bar_w, vals, bar_w, label=lbl, color=col, alpha=0.88)
         bars.append(b)
 
     ax2 = ax1.twinx()
-    ax2.plot(x, pause, 'D--', color='#C44E52', linewidth=2.5, markersize=8,
+    ax2.plot(x, pause, 'D--', color='#C44E52', linewidth=2.5, markersize=9,
              label='Pause Rate', zorder=5)
-    ax2.set_ylabel('Pause Rate (%)', color='#C44E52', fontsize=14)
+    ax2.set_ylabel('Pause Rate (%)', color='#C44E52', fontsize=15)
     ax2.tick_params(axis='y', labelcolor='#C44E52', labelsize=14)
     ax2.set_ylim(0, 110)
 
     ax1.set_xticks(x)
     ax1.set_xticklabels(labels, fontsize=14)
     ax1.set_ylim(0, 110)
-    ax1.set_ylabel('Accuracy (%)', fontsize=14)
-    ax1.set_xlabel('Model  ·  Format', fontsize=14)
-    ax1.set_title(f'{dataset} — Diagnostic Accuracy (Original Variant, Complete Clinical Data)',
-                  fontsize=16, fontweight='bold', pad=14)
+    ax1.set_ylabel('Accuracy (%)', fontsize=15)
+    ax1.set_xlabel('MedGemma Model Variants', fontsize=15, labelpad=8)
+    ax1.set_title(f'{dataset} -- Diagnostic Accuracy (Complete Clinical Data)',
+                  fontsize=17, fontweight='bold', pad=12)
 
-    handles1 = [mpatches.Patch(color=c, alpha=0.85, label=l)
+    handles1 = [mpatches.Patch(color=c, alpha=0.88, label=l)
                 for c, l in zip(colors, bar_labels)]
     line_handle = plt.Line2D([0], [0], color='#C44E52', linewidth=2.5,
-                             linestyle='--', marker='D', markersize=8, label='Pause Rate')
-    ax1.legend(handles=handles1 + [line_handle], loc='upper left', fontsize=13, framealpha=0.9)
+                             linestyle='--', marker='D', markersize=9, label='Pause Rate')
+    ax1.legend(handles=handles1 + [line_handle], loc='upper left', fontsize=13,
+               framealpha=0.92, edgecolor='#cccccc')
 
     for b_group in bars:
         for rect in b_group:
             h = rect.get_height()
             if h > 0:
                 ax1.text(rect.get_x() + rect.get_width() / 2, h + 1,
-                         f'{h:.0f}%', ha='center', va='bottom', fontsize=9)
+                         f'{h:.0f}%', ha='center', va='bottom', fontsize=10,
+                         fontweight='bold')
 
     plt.tight_layout()
     base = os.path.join(out_dir, f'{dataset.upper()}_consolidated_accuracy')
@@ -251,9 +252,9 @@ def plot_accuracy_overview(entries: list, dataset: str, out_dir: str):
 
 def plot_safety_history(entries: list, dataset: str, out_dir: str):
     """
-    Bar chart — history_only variant.
+    Bar chart -- history_only variant (publication quality).
     Primary: Pause Rate (key safety metric, higher = safer).
-    Secondary: Acc(att) — accuracy among cases that weren't paused.
+    Secondary: Acc(att) -- accuracy among cases that weren't paused.
     """
     labels  = [e['label']   for e in entries]
     pause   = [e['pause']   for e in entries]
@@ -263,31 +264,30 @@ def plot_safety_history(entries: list, dataset: str, out_dir: str):
     x = np.arange(n)
     bar_w = 0.35
 
-    fig, ax = plt.subplots(figsize=(13, 7))
+    fig, ax = plt.subplots(figsize=(11, 6))
 
-    b1 = ax.bar(x - bar_w / 2, pause,   bar_w, label='Pause Rate (safety ↑)',
-                color='#2196F3', alpha=0.85)
-    b2 = ax.bar(x + bar_w / 2, acc_att, bar_w, label='Acc among attempted',
-                color='#FF9800', alpha=0.85)
+    b1 = ax.bar(x - bar_w / 2, pause,   bar_w, label='Pause Rate',
+                color='#2196F3', alpha=0.88)
+    b2 = ax.bar(x + bar_w / 2, acc_att, bar_w, label='Acc(att)',
+                color='#FF9800', alpha=0.88)
 
-    ax.axhline(100, color='#2196F3', linewidth=1.5, linestyle=':', alpha=0.5,
-               label='100% pause (ideal)')
+    ax.axhline(100, color='#2196F3', linewidth=1.2, linestyle=':', alpha=0.4)
 
     for bars, vals in [(b1, pause), (b2, acc_att)]:
         for rect, v in zip(bars, vals):
             if v > 0:
                 ax.text(rect.get_x() + rect.get_width() / 2, v + 1,
-                        f'{v:.0f}%', ha='center', va='bottom', fontsize=11)
+                        f'{v:.0f}%', ha='center', va='bottom',
+                        fontsize=12, fontweight='bold')
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=14)
     ax.set_ylim(0, 115)
-    ax.set_ylabel('Rate / Accuracy (%)', fontsize=14)
-    ax.set_xlabel('Model  ·  Format', fontsize=14)
-    ax.set_title(f'{dataset} — Safety Behavior (History-Only Variant)\n'
-                 'Higher Pause Rate = safer (system correctly detects missing data)',
-                 fontsize=15, fontweight='bold', pad=12)
-    ax.legend(loc='lower right', fontsize=13, framealpha=0.9)
+    ax.set_ylabel('Percentage (%)', fontsize=15)
+    ax.set_xlabel('MedGemma Model Variants', fontsize=15, labelpad=8)
+    ax.set_title(f'{dataset} -- Safety Behavior (History-Only Variant)',
+                 fontsize=17, fontweight='bold', pad=12)
+    ax.legend(loc='lower right', fontsize=13, framealpha=0.92, edgecolor='#cccccc')
 
     plt.tight_layout()
     base = os.path.join(out_dir, f'{dataset.upper()}_consolidated_safety_history')
@@ -298,8 +298,15 @@ def plot_safety_history(entries: list, dataset: str, out_dir: str):
 
 def plot_pause_heatmap(entries_by_variant: dict, dataset: str, out_dir: str):
     """
-    Heatmap: rows = model+format, columns = 4 incomplete variants.
+    Publication-quality heatmap: rows = model+format, columns = 4 incomplete variants.
     Color = Pause Rate (higher = safer, greener).
+
+    Design choices for publication quality:
+    - seaborn heatmap with clean cell borders (no grid intersection confusion)
+    - Large annotation font (16pt bold) for readability in print
+    - Fixed 0-100 color scale for cross-figure consistency
+    - Concise title (no subtitle explanation)
+    - Square cells with consistent aspect ratio
     """
     model_labels = [e['label'].replace('\n', ' ')
                     for e in entries_by_variant[INCOMPLETE_VARIANTS[0]]]
@@ -310,30 +317,54 @@ def plot_pause_heatmap(entries_by_variant: dict, dataset: str, out_dir: str):
         for v in INCOMPLETE_VARIANTS
     ]).T  # shape: (n_models, n_variants)
 
-    fig, ax = plt.subplots(figsize=(11, max(6, len(model_labels) * 0.9 + 2)))
+    n_rows = len(model_labels)
+    n_cols = len(col_labels)
+    fig, ax = plt.subplots(figsize=(n_cols * 2.4 + 3, n_rows * 0.9 + 2))
 
-    im = ax.imshow(data, cmap='YlGn', aspect='auto', vmin=0, vmax=100)
-    cbar = plt.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
-    cbar.set_label('Pause Rate (%)', fontsize=14)
-    cbar.ax.tick_params(labelsize=13)
+    # Use seaborn heatmap for clean cell rendering
+    sns.heatmap(
+        data,
+        ax=ax,
+        annot=False,           # manual annotations below for finer control
+        cmap='YlGn',
+        vmin=0,
+        vmax=100,
+        linewidths=2.0,        # clean white borders between cells
+        linecolor='white',
+        square=True,           # uniform cell shape
+        cbar_kws={
+            'label': 'Pause Rate (%)',
+            'shrink': 0.8,
+            'pad': 0.02,
+        },
+    )
 
-    ax.set_xticks(range(len(col_labels)))
-    ax.set_xticklabels(col_labels, fontsize=14)
-    ax.set_yticks(range(len(model_labels)))
-    ax.set_yticklabels(model_labels, fontsize=14)
+    # Style the colorbar
+    cbar = ax.collections[0].colorbar
+    cbar.ax.tick_params(labelsize=14)
+    cbar.set_label('Pause Rate (%)', fontsize=15, labelpad=10)
 
-    for i in range(len(model_labels)):
-        for j in range(len(col_labels)):
+    # Manual cell annotations -- large, bold, high-contrast
+    for i in range(n_rows):
+        for j in range(n_cols):
             v = data[i, j]
-            text_color = 'black' if v < 70 else 'white'
-            ax.text(j, i, f'{v:.0f}%', ha='center', va='center',
-                    fontsize=13, fontweight='bold', color=text_color)
+            text_color = '#ffffff' if v >= 65 else '#1a1a1a'
+            ax.text(j + 0.5, i + 0.5, f'{v:.0f}%',
+                    ha='center', va='center',
+                    fontsize=16, fontweight='bold', color=text_color)
 
-    ax.set_title(f'{dataset} — Pause Rate Across All Incomplete Variants\n'
-                 '(Higher = safer: system detects missing data and pauses)',
-                 fontsize=15, fontweight='bold', pad=12)
-    ax.set_xlabel('Missing-Data Variant', fontsize=14)
-    ax.set_ylabel('Model  ·  Format', fontsize=14)
+    # Axis labels
+    ax.set_xticklabels(col_labels, fontsize=15, rotation=0, ha='center')
+    ax.set_yticklabels(model_labels, fontsize=15, rotation=0, va='center')
+    ax.set_xlabel('Context Variant (Incomplete Data)', fontsize=15, labelpad=10)
+    ax.set_ylabel('MedGemma Model Variants', fontsize=15, labelpad=10)
+
+    # Concise title -- no multi-line subtitle
+    ax.set_title(f'{dataset} -- Pause Rate on Incomplete Variants',
+                 fontsize=17, fontweight='bold', pad=14)
+
+    # Remove top/right spines for cleaner look
+    ax.tick_params(top=False, right=False, left=False, bottom=False)
 
     plt.tight_layout()
     base = os.path.join(out_dir, f'{dataset.upper()}_consolidated_pause_heatmap')
@@ -344,38 +375,29 @@ def plot_pause_heatmap(entries_by_variant: dict, dataset: str, out_dir: str):
 
 def plot_safety_governor_scatter(file_entries: list, dataset: str, out_dir: str):
     """
-    Quadrant Safety Map: scatter plot showing the inverse relationship between
-    diagnostic accuracy on complete data (X-axis) and average pause rate on
-    incomplete data (Y-axis).
-
-    Each point is labeled directly with a short tag. Labels are placed at
-    manually tuned positions with thin connector lines to avoid all overlaps.
-    Threshold lines at pause=85% and acc=50% mark the minimum safety/utility bars.
-    Diagonal x+y=100 shows that all points have combined safety+accuracy > baseline.
+    Quadrant Safety Map (publication quality): scatter plot showing the inverse
+    relationship between diagnostic accuracy on complete data (X-axis) and
+    average pause rate on incomplete data (Y-axis).
     """
     from matplotlib.lines import Line2D
 
-    # Short display tags — consistent with "no opts" / "opts" used throughout paper
     SHORT_TAG = {
-        ('medgemma-27b-it',    'no opts'):  '27b  no opts',
-        ('medgemma-27b-it',    'w/ opts'):  '27b  opts',
-        ('medgemma-4b-it',     'no opts'):  '4b  no opts',
-        ('medgemma-4b-it',     'w/ opts'):  '4b  opts',
-        ('medgemma-1.5-4b-it', 'no opts'):  '1.5b  no opts',
-        ('medgemma-1.5-4b-it', 'w/ opts'):  '1.5b  opts',
+        ('medgemma-27b-it',    'no opts'):  '27b no opts',
+        ('medgemma-27b-it',    'w/ opts'):  '27b opts',
+        ('medgemma-4b-it',     'no opts'):  '4b no opts',
+        ('medgemma-4b-it',     'w/ opts'):  '4b opts',
+        ('medgemma-1.5-4b-it', 'no opts'):  '1.5b no opts',
+        ('medgemma-1.5-4b-it', 'w/ opts'):  '1.5b opts',
     }
 
-    # Manually tuned label anchor positions (data coords) chosen to avoid overlaps.
-    # All 6 points cluster in x=[28-76], y=[87-94].
-    # Points: 27b-noopt(28,90), 4b-noopt(36,94), 1.5b-noopt(44,90),
-    #         27b-opts(56,88),   4b-opts(64,87),  1.5b-opts(76,92)
+    # Manually tuned label anchor positions to avoid overlaps.
     LABEL_XY = {
-        ('medgemma-27b-it',    'no opts'):  (6,   90,  'left'),   # far left
-        ('medgemma-4b-it',     'no opts'):  (24,  97,  'left'),   # upper-left of cluster
-        ('medgemma-1.5-4b-it', 'no opts'):  (40,  83,  'right'),  # below, slightly right
-        ('medgemma-27b-it',    'w/ opts'):  (44,  95,  'right'),  # upper-left of point
-        ('medgemma-4b-it',     'w/ opts'):  (68,  80,  'left'),   # below point
-        ('medgemma-1.5-4b-it', 'w/ opts'):  (64,  86,  'right'),  # below-left of point
+        ('medgemma-27b-it',    'no opts'):  (6,   90,  'left'),
+        ('medgemma-4b-it',     'no opts'):  (24,  97,  'left'),
+        ('medgemma-1.5-4b-it', 'no opts'):  (40,  83,  'right'),
+        ('medgemma-27b-it',    'w/ opts'):  (44,  95,  'right'),
+        ('medgemma-4b-it',     'w/ opts'):  (68,  80,  'left'),
+        ('medgemma-1.5-4b-it', 'w/ opts'):  (64,  86,  'right'),
     }
 
     acc_complete     = []
@@ -397,35 +419,35 @@ def plot_safety_governor_scatter(file_entries: list, dataset: str, out_dir: str)
                 inc_pauses.append(float(row.get('Pause Rate (%)', 0)))
         pause_incomplete.append(sum(inc_pauses) / len(inc_pauses) if inc_pauses else 0.0)
 
-    fig, ax = plt.subplots(figsize=(11, 9))
+    fig, ax = plt.subplots(figsize=(9, 8))
 
     # ── Threshold guide lines ──────────────────────────────────────────────────
-    ax.axhline(85, color='#999999', linewidth=1.4, linestyle=':', alpha=0.75, zorder=2)
-    ax.text(2, 86.2, 'pause = 85%  (safety bar)', fontsize=11, color='#666666', alpha=0.85)
+    ax.axhline(85, color='#999999', linewidth=1.2, linestyle=':', alpha=0.7, zorder=2)
+    ax.text(2, 86.2, 'Safety threshold (85%)', fontsize=12, color='#666666', alpha=0.85)
 
-    ax.axvline(50, color='#999999', linewidth=1.4, linestyle=':', alpha=0.75, zorder=2)
-    ax.text(51.2, 4, 'acc = 50%\n(utility bar)', fontsize=11, color='#666666', alpha=0.85)
+    ax.axvline(50, color='#999999', linewidth=1.2, linestyle=':', alpha=0.7, zorder=2)
+    ax.text(51.5, 4, 'Utility\nthreshold\n(50%)', fontsize=11, color='#666666', alpha=0.85)
 
     # ── Diagonal: x + y = 100 ─────────────────────────────────────────────────
     x_line = np.linspace(0, 100, 300)
     y_line = 100 - x_line
-    ax.plot(x_line, y_line, '--', color='#777777', linewidth=1.8, alpha=0.6, zorder=2)
-    ax.text(63, 33, 'x + y = 100\n(above = safety + accuracy > baseline)',
-            fontsize=10, color='#666666', alpha=0.8, rotation=-42, ha='center')
+    ax.plot(x_line, y_line, '--', color='#777777', linewidth=1.5, alpha=0.5, zorder=2)
+    ax.text(63, 33, 'x + y = 100',
+            fontsize=11, color='#666666', alpha=0.7, rotation=-42, ha='center')
 
-    # ── Ideal zone shading — text placed at very top, clear of all data points ─
+    # ── Ideal zone shading ─────────────────────────────────────────────────────
     ax.fill_between(x_line, np.maximum(y_line, 85), 100,
                     where=(x_line >= 50), alpha=0.10, color='#4CAF50', zorder=1)
     ax.text(66, 100.5,
-            'Diagnose when complete  +  Pause when incomplete',
-            fontsize=11.5, color='#1B5E20', fontstyle='italic',
-            alpha=0.92, ha='center', va='bottom',
+            'Ideal Zone',
+            fontsize=13, color='#1B5E20', fontweight='bold',
+            alpha=0.90, ha='center', va='bottom',
             bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
                       alpha=0.7, edgecolor='none'))
 
     # ── Problematic zone label ─────────────────────────────────────────────────
     ax.text(18, 18, 'Problematic Zone', fontsize=12, color='#B71C1C',
-            fontstyle='italic', alpha=0.65, ha='center')
+            fontstyle='italic', alpha=0.55, ha='center')
 
     # ── Colors per model family ────────────────────────────────────────────────
     model_colors = {
@@ -439,7 +461,7 @@ def plot_safety_governor_scatter(file_entries: list, dataset: str, out_dir: str)
         color  = model_colors.get(mkey, '#555555')
         marker = 's' if fmt == 'w/ opts' else 'o'
         ax.scatter(acc, pause, color=color, marker=marker,
-                   s=250, zorder=5, edgecolors='white', linewidths=1.0)
+                   s=280, zorder=5, edgecolors='white', linewidths=1.2)
 
         tag = SHORT_TAG.get((mkey, fmt), mkey)
         tx, ty, ha = LABEL_XY.get((mkey, fmt), (acc + 4, pause + 2, 'left'))
@@ -447,27 +469,25 @@ def plot_safety_governor_scatter(file_entries: list, dataset: str, out_dir: str)
         ax.annotate(
             tag, xy=(acc, pause), xycoords='data',
             xytext=(tx, ty), textcoords='data',
-            fontsize=11.5, color=color, fontweight='bold', ha=ha, va='center',
-            arrowprops=dict(arrowstyle='-', color=color, lw=0.8, alpha=0.45),
+            fontsize=12, color=color, fontweight='bold', ha=ha, va='center',
+            arrowprops=dict(arrowstyle='-', color=color, lw=0.8, alpha=0.4),
         )
 
     ax.set_xlim(0, 100)
-    ax.set_ylim(0, 104)   # extra headroom for top label
-    ax.set_xlabel('Top-1 Accuracy on Complete Cases (%)', fontsize=14)
-    ax.set_ylabel('Avg Pause Rate on Incomplete Cases (%)', fontsize=14)
-    ax.set_title(
-        f'{dataset} - Safety Governor: Quadrant Safety Map\n'
-        'o = no opts   sq = opts   |   All points in ideal zone',
-        fontsize=13, fontweight='bold', pad=12)
+    ax.set_ylim(0, 104)
+    ax.set_xlabel('Top-1 Accuracy on Complete Cases (%)', fontsize=15, labelpad=8)
+    ax.set_ylabel('Avg Pause Rate on Incomplete Cases (%)', fontsize=15, labelpad=8)
+    ax.set_title(f'{dataset} -- Safety Governor',
+                 fontsize=17, fontweight='bold', pad=12)
 
-    # Minimal legend: marker shapes only (model colors are self-labeled on points)
     legend_handles = [
         Line2D([0], [0], marker='o', color='w', markerfacecolor='#555555',
-               markersize=12, label='No options  (o)'),
+               markersize=12, label='No options'),
         Line2D([0], [0], marker='s', color='w', markerfacecolor='#555555',
-               markersize=12, label='With MCQ options  (sq)'),
+               markersize=12, label='With MCQ options'),
     ]
-    ax.legend(handles=legend_handles, loc='lower left', fontsize=12, framealpha=0.90)
+    ax.legend(handles=legend_handles, loc='lower left', fontsize=13,
+              framealpha=0.92, edgecolor='#cccccc')
 
     plt.tight_layout()
     base = os.path.join(out_dir, f'{dataset.upper()}_safety_governor_scatter')

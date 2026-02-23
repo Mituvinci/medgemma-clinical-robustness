@@ -42,8 +42,6 @@ from src.agents.models.medgemma_adapter import MedGemmaAdapter
 from src.agents.models.gemini_adapter import GeminiAdapter
 from src.agents.models.vertex_medgemma_adapter import VertexMedGemmaAdapter
 from src.agents.models.hf_inference_adapter import HFInferenceAdapter
-from src.agents.models.openai_adapter import OpenAIAdapter
-from src.agents.models.claude_adapter import ClaudeAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -221,47 +219,6 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         ]
     },
 
-    # ====== STUB MODELS (API keys not yet provided) ======
-
-    "gpt4": {
-        "adapter": OpenAIAdapter,
-        "status": "stub",
-        "description": "OpenAI GPT-4 Turbo - Advanced general purpose model",
-        "provider": "openai",
-        "requires": "OPENAI_API_KEY",
-        "model_id": "gpt-4-turbo",
-        "message": "OpenAI integration ready - add OPENAI_API_KEY to enable",
-        "strengths": [
-            "Advanced reasoning",
-            "Code generation",
-            "Structured outputs"
-        ],
-        "use_cases": [
-            "Complex diagnostics",
-            "Medical research",
-            "Clinical decision support"
-        ]
-    },
-
-    "claude": {
-        "adapter": ClaudeAdapter,
-        "status": "stub",
-        "description": "Anthropic Claude 3 Opus - Long context specialist",
-        "provider": "anthropic",
-        "requires": "CLAUDE_API_KEY",
-        "model_id": "claude-3-opus-20240229",
-        "message": "Claude integration ready - add CLAUDE_API_KEY to enable",
-        "strengths": [
-            "Long context (200K tokens)",
-            "Careful reasoning",
-            "Nuanced analysis"
-        ],
-        "use_cases": [
-            "Comprehensive case review",
-            "Literature synthesis",
-            "Detailed clinical notes"
-        ]
-    }
 }
 
 

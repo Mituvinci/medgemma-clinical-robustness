@@ -1328,7 +1328,7 @@ hr {
                     example_btn_0 = gr.Button(
                         value=(
                             "Case 1 : 73M, post-vaccine rash:  "
-                            + _CASE1_FULL[:215] + "..."
+                            + _CASE1_FULL[:50] + "..."
                         ),
                         variant="secondary",
                         elem_id="example-btn-0",
@@ -1336,7 +1336,7 @@ hr {
                     example_btn_1 = gr.Button(
                         value=(
                             "Case 2 : 10M, tense bullae:  "
-                            + _CASE2_FULL[:217] + "..."
+                            + _CASE2_FULL[:50] + "..."
                         ),
                         variant="secondary",
                         elem_id="example-btn-1",

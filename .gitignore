@@ -4,31 +4,11 @@
 !.env.template
 
 # Documentation (only README.md is public)
-*.md
+
 !README.md
 !data/examples/README.md
 
 # Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
 # Virtual Environment
 venv/
@@ -36,40 +16,19 @@ ENV/
 env/
 .venv
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
 
 # Logs
 logs/
 *.log
 
-# Data (local cache - not redistributed)
-local_cache/
-*.json.bak
-*.pkl
-*.pickle
 
 # NEJM Evaluation Cases (private - not for redistribution)
 NEJM/
 NEJIM/
 
-# ChromaDB
-data/chroma/
+JAADCR
+design
 
-# Google Cloud Credentials
-*.json
-!mock_cases.json
-!**/test_*.json
-!data/examples/*.json
-
-# Jupyter Notebooks
-.ipynb_checkpoints/
-*.ipynb
 
 # Testing
 .pytest_cache/
@@ -77,12 +36,6 @@ data/chroma/
 htmlcov/
 .tox/
 
-# Model weights (too large for git)
-*.bin
-*.safetensors
-*.h5
-*.ckpt
-*.pth
 
 # Temporary files
 *.tmp

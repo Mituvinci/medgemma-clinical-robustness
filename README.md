@@ -25,9 +25,11 @@ Two-tier hybrid system:
 2. Research Agent -- retrieves clinical guidelines from Vertex AI RAG (55 documents: AAD, StatPearls, JAADCR)
 3. Diagnostic Agent -- generates SOAP note with differential diagnoses and guideline citations
 
+![Multi-Agent Workflow](assets/workflow_diagram.jpg)
+
 ### Example: Multi-Agent Workflow in Action
 
-![Multi-Agent Workflow](assets/workflow_diagram.jpg)
+
 
 **Complete case (diagnosis provided):**
 

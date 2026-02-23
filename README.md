@@ -1,5 +1,4 @@
-# MedGemma Clinical Robustness Assistant
-![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
+# MedGemma Clinical Robustness Assistant ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 A multi-agent clinical decision support system for dermatology that demonstrates diagnostic robustness under varying levels of clinical information. Built for the [Med-Gemma Impact Challenge](https://www.kaggle.com/competitions/med-gemma-impact-challenge).
 
 The core principle: never guess when data is missing. The system pauses and asks clarifying questions instead.

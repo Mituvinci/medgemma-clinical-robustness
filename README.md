@@ -53,6 +53,8 @@ The workflow **pauses** -- no diagnosis attempted. This is the core safety behav
 
 ---
 
+![Complete case (diagnosis provided):](assets/ui_interface_git.png)
+
 ## Evaluation
 
 750 evaluations across 3 MedGemma models, 5 context variants, and 2 data formats on the JAAD Case Reports (JDCR) dataset.
